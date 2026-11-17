@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# sync-upstream — merge garrytan/gstack main into this fork's main, on GitHub.
+#
+# bin/gstack-update-check runs it before it reads the fork's version, so an
+# install that follows the fork sees a new upstream release at its next check.
+# The merge is GitHub's "sync fork" call; nothing in the install changes here.
+#
+# Prints nothing when the fork is current, was just merged, or GitHub cannot
+# be reached (no gh, no token, no network). Otherwise one line on stdout:
+#   FORK_SYNC_CONFLICT ...   upstream no longer merges cleanly; the install
+#                            stays on its version until someone resolves it
+#                            (fork/README.md, "When the sync conflicts")
+#   FORK_SYNC_FAILED ...     GitHub refused the call (permissions, scopes)
+# Always exits 0: a failed sync never fails the version check.
+#
+# GSTACK_FORK_REPO overrides the fork's owner/name.
+set -u
+FORK="${GSTACK_FORK_REPO:-dtoelke/gstack}"
+command -v gh >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || exit 0
+TOKEN=$(gh auth token 2>/dev/null) || exit 0
+[ -n "$TOKEN" ] || exit 0
+
+OUT=$(curl -s --max-time 20 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -d '{"branch":"main"}' \
+  -w '\n%{http_code}' \
+  "https://api.github.com/repos/$FORK/merge-upstream" 2>/dev/null) || exit 0
+CODE=$(printf '%s\n' "$OUT" | tail -1)
+README="$(cd "$(dirname "$0")" && pwd)/README.md"
+case "$CODE" in
+  200|000|'') ;;
+  409) echo "FORK_SYNC_CONFLICT garrytan/gstack main no longer merges cleanly into $FORK main, so this install stays on its current gstack version until the conflict is resolved in the fork; steps: $README" ;;
+  *)
+    MSG=$(printf '%s\n' "$OUT" | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 | cut -c1-200)
+    echo "FORK_SYNC_FAILED GitHub answered HTTP $CODE to the upstream merge of $FORK${MSG:+ ($MSG)}, so this install may be behind upstream; see $README" ;;
+esac
+exit 0
