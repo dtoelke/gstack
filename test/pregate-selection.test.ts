@@ -15,8 +15,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
 import { changedLiterals, constantsIn, consumersOf, type LiteralWaiver } from '../lib/pregate/checks/literals';
-import { parseSummary, planRuns } from '../lib/pregate/checks/lanes';
-import { DEFAULT_CONFIG, validateConfig } from '../lib/pregate/config';
+import { parseSummary, planRuns, splitVitestConfigs } from '../lib/pregate/checks/lanes';
+import { DEFAULT_CONFIG, parseConfig, validateConfig } from '../lib/pregate/config';
 import { isDocsEmptyLane } from '../lib/pregate/docs-lane';
 import { buildGraph, testsFor } from '../lib/pregate/import-graph';
 import { CHECK_IDS } from '../lib/pregate/index';
@@ -213,9 +213,9 @@ describe('literals (pure)', () => {
     ]);
   });
   // Value: protects=a sibling file that shares the module's stem (`postgres-unit-arms.txt` beside `postgres-unit-arms.ts`) is not the
-  //   module, so a test that only names it is not a consumer, while an extensionless import, a JS/TS import extension, the module's own
-  //   file name and a path ending at the stem (then a quote, space, bracket, sentence end or `.d.ts`) still are, and neither `<file>.snap` nor a JS twin of a
-  //   shell module is; fails_when=`/<stem>` again accepts any following `.<word>`, the file name accepts a further extension,
+  //   module, so a test that only names it is not a consumer, while an extensionless import, a JS/TS import extension and `.d.ts` still
+  //   are, and for a non-JS module so are its own file name and a path ending at the stem (then a quote, space, bracket or sentence end),
+  //   and neither `<file>.snap` nor a JS twin of a shell module is; fails_when=`/<stem>` again accepts any following `.<word>`, the file name accepts a further extension,
   //   a non-JS module takes JS/TS extensions, or stops accepting a following space, bracket or sentence end
   //   (GST-820: 17 false files in gbrain #8372 on ARM_SHARDS 12 -> 18); why_new=no test had a same-stem sibling; seam=none;
   //   no_claim=name-gated hits (a file naming ARM_SHARDS still counts any 12)
@@ -241,8 +241,11 @@ describe('literals (pure)', () => {
     };
     for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
     expect(consumersOf(root, Object.keys(files), { name: 'ARM_SHARDS', old: '12', new: '18', file: 'scripts/postgres-unit-arms.ts' })).toEqual([
-      'test/import.test.ts:2', 'test/import-js.test.ts:2', 'test/own.test.ts:2', 'test/line-end.test.ts:2',
-      'test/prose.test.ts:2', 'test/paren.test.ts:2', 'test/sentence.test.ts:2', 'test/dts.test.ts:2',
+      'test/import.test.ts:2', 'test/import-js.test.ts:2', 'test/dts.test.ts:2',
+    ]);
+    // A non-JS module has no import specifier, so its path anywhere in the text counts, bounded the same way.
+    expect(consumersOf(root, Object.keys(files), { name: 'ARM_SHARDS', old: '12', new: '18', file: 'scripts/postgres-unit-arms.py' })).toEqual([
+      'test/import.test.ts:2', 'test/line-end.test.ts:2', 'test/prose.test.ts:2', 'test/paren.test.ts:2', 'test/sentence.test.ts:2',
     ]);
     expect(consumersOf(root, ['test/sh-twin.test.ts', 'test/sh-own.test.ts'], { name: 'ARMS', old: '12', new: '18', file: 'scripts/arms-tool.sh' })).toEqual(['test/sh-own.test.ts:2']);
     fs.rmSync(root, { recursive: true, force: true });
@@ -266,8 +269,33 @@ describe('literals (pure)', () => {
     // A one-character value: only the file that names the constant counts; the path fragment alone is not enough for "2".
     // pregate-literal: GSTACK_CAPY_WRAPPER=3 a fixture's own 2 -> 3 bump, not the shipped wrapper revision
     expect(consumersOf(root, all, { name: 'GSTACK_CAPY_WRAPPER', old: '2', new: '3', file: 'capy/skill/gstack/scripts/install.sh' })).toEqual(['test/wrapper.test.ts:2']);
-    // A longer value: the constant's name, the module's full file name, or its stem as a path fragment; the bare word "retry" in prose and "preretry.js" do not count.
-    expect(consumersOf(root, all, { name: 'TIMEOUT_MS', old: '5000', new: '9000', file: 'lib/retry.js' })).toEqual(['test/retry.test.ts:1', 'test/retry-path.test.ts:2', 'test/retry-bare.test.ts:2']);
+    // A longer value: the constant's name or a `require` of the module; `load('retry.js')`, the bare word "retry" in prose and "preretry.js" do not count.
+    expect(consumersOf(root, all, { name: 'TIMEOUT_MS', old: '5000', new: '9000', file: 'lib/retry.js' })).toEqual(['test/retry.test.ts:1', 'test/retry-path.test.ts:2']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  // Value: protects=a JS/TS test counts as a consumer of a JS/TS module's constant only when it names the constant or loads the module
+  //   through an import, re-export, dynamic import, require or mock-helper specifier, so a workflow test that searches for the module's
+  //   path inside a shell-command string is not one, while a non-JS test still matches the path in its text; fails_when=the module's
+  //   path anywhere in a JS/TS test's text counts again (STAGING_GATE_JOB 'gate' -> 'Gate' flagged 18 unrelated 'gate' strings in a
+  //   test that only searched for `node tools/repo/src/ci/ci-budget-report.ts`); why_new=import specifiers and text mentions were one
+  //   rule; seam=none; no_claim=lowercase call-site names and one-character values (unchanged text rule)
+  test('consumersOf: a JS/TS test loads a JS/TS module only through a specifier; its path in a string or comment does not count', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-specifier-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'ci/boundary.test.ts': ['// runs tools/ci/budget-report.ts weekly', "const step = steps.find((s) => s.run?.includes('node tools/ci/budget-report.ts'));", "expect(step.needs).toContain('gate');", ''].join(nl),
+      'ci/budget-report.test.ts': ["import { summarize } from '../tools/ci/budget-report';", "expect(summarize().job).toBe('gate');", ''].join(nl),
+      'ci/named.test.ts': ["expect(STAGING_GATE_JOB).not.toBe('gate');", ''].join(nl),
+      'ci/dynamic.test.ts': ["const mod = await import('../tools/ci/budget-report.ts');", "expect(mod.job).toBe('gate');", ''].join(nl),
+      'ci/mocked.test.ts': ["vi.mock('../tools/ci/budget-report', () => ({}));", "expect(job).toBe('gate');", ''].join(nl),
+      'ci/reexport.test.ts': ["export { summarize } from '../tools/ci/budget-report.js';", "expect(job).toBe('gate');", ''].join(nl),
+      'ci/other-import.test.ts': ["import { x } from '../tools/ci/budget-report-v2';", "expect(x).toBe('gate');", ''].join(nl),
+      'ci/runner.test.sh': ['node tools/ci/budget-report.ts', "[ \"$job\" = 'gate' ]", ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    expect(consumersOf(root, Object.keys(files), { name: 'STAGING_GATE_JOB', old: "'gate'", new: "'Gate'", file: 'tools/ci/budget-report.ts' })).toEqual([
+      'ci/budget-report.test.ts:2', 'ci/named.test.ts:1', 'ci/dynamic.test.ts:2', 'ci/mocked.test.ts:2', 'ci/reexport.test.ts:2', 'ci/runner.test.sh:2',
+    ]);
     fs.rmSync(root, { recursive: true, force: true });
   });
   // Value: protects=a one-character old value counts only in a statement that names the constant (its line, or lines that continue it),
@@ -419,6 +447,12 @@ describe('literals (pure)', () => {
     expect(codes({ empty_lanes: ['notes/**/*.md'] })).toEqual([]);
     expect(codes({ selection: { 'ci/job': 'x' } })).toEqual(['PREGATE_CONFIG_INVALID:selection["ci/job"]']);
     expect(codes({ extra: 1 })).toEqual(['PREGATE_CONFIG_INVALID:extra']);
+    expect(codes({ vitest_scripts: ['test', 'test:harness'] })).toEqual([]);
+    expect(codes({ vitest_scripts: 'test' })).toEqual(['PREGATE_CONFIG_INVALID:vitest_scripts']);
+    expect(codes({ vitest_scripts: ['test', ''] })).toEqual(['PREGATE_CONFIG_INVALID:vitest_scripts']);
+    expect(codes({ vitest_scripts: [7] })).toEqual(['PREGATE_CONFIG_INVALID:vitest_scripts']);
+    expect(parseConfig(JSON.stringify({ vitest_scripts: ['test'] })).config.vitest_scripts).toEqual(['test']);
+    expect(parseConfig('{}').config.vitest_scripts).toBeNull();
   });
 });
 
@@ -1034,6 +1068,19 @@ describe('nested JS packages run their own runner from their own directory', () 
     expect(planRuns(declared, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'bun test {files}', cwd: '', files: ['app/src/sum.test.ts'] }]);
   });
 
+  // Value: protects=a test under a package.json that names no runner (one that only sets `type: module`) runs with the next package up
+  //   that declares vitest, from that package, instead of falling to the root's bun; fails_when=the nearest package.json alone decides
+  //   again (apps/mobile/dev under apps/mobile: 43 of 146 failing under bun); why_new=only a runnerless package directly under the root
+  //   was tested; seam=none; no_claim=the runners themselves (plan only)
+  test('a runnerless package.json inside a vitest package defers to that package', () => {
+    const repo = fixture({ pregate: null, baseFiles: { ...APP, 'app/dev/package.json': JSON.stringify({ type: 'module' }) + '\n' } });
+    const ctx = ctxFor(repo, pmShim(repo));
+    write(repo.work, 'bun.lock', '{}\n');
+    expect(planRuns(ctx, ['app/dev/run.test.ts', 'app/src/sum.test.ts']).groups).toEqual([
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['dev/run.test.ts', 'src/sum.test.ts'] },
+    ]);
+  });
+
   // Value: protects=the reported case end to end: a touched source file in a nested pnpm+vitest package runs `pnpm exec vitest run`
   //   in that package with the package-relative path and passes on vitest's summary; fails_when=the lane runs from the repo root or
   //   with the root runner; why_new=no nested package run existed; seam=none; no_claim=a real pnpm or vitest (PATH shim)
@@ -1050,6 +1097,141 @@ describe('nested JS packages run their own runner from their own directory', () 
     expect(fs.readFileSync(/log: (\S+)/.exec(r.out)![1]!, 'utf8')).toContain('ran in app: exec vitest run src/sum.test.ts');
     expect(r.status).toBe(EXIT.ok);
   }, 60_000);
+  // Value: protects=a test the package's default vitest config excludes, but a config its scripts name includes (a harness tier run by
+  //   `test:harness`), runs under that config instead of the default run's "No test files found" failing the lane; a file no config
+  //   includes still runs under the default and fails; fails_when=every package test runs under the default config again, or an
+  //   excluded test is dropped silently; why_new=only single-config packages were run; seam=none; no_claim=a real pnpm or vitest (shim
+  //   answers `vitest list` by directory)
+  test('a test only a script-named vitest config includes runs under that config; one no config includes stays with the default run', () => {
+    const HARNESS_APP = {
+      ...APP,
+      'app/package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest run', 'test:harness': 'vitest run --config vitest.harness.config.ts' }, devDependencies: { vitest: '^3.2.0' } }) + '\n',
+      'app/vitest.config.ts': "export default { test: { exclude: ['harness/**'] } };\n",
+      'app/vitest.harness.config.ts': "export default { test: { include: ['harness/**/*.test.ts'] } };\n",
+      'app/harness/spawn.ts': 'export const spawn = () => 1;\n',
+      'app/harness/spawn.test.ts': "import { expect, test } from 'vitest';\nimport { spawn } from './spawn';\ntest('spawn', () => expect(spawn()).toBe(1));\n",
+    };
+    const repo = fixture({ pregate: null, baseFiles: HARNESS_APP });
+    commit(repo, { '.github/workflows/free-tests.yml': null, '.github/workflows/windows.yml': null }, 'no workflows');
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    // vitest stand-in: the harness config includes harness/ (and orphan/ never), the default config everything else but harness/.
+    const env = pmShim(repo);
+    fs.writeFileSync(path.join(repo.root, 'shim', 'pnpm'), `#!/usr/bin/env bash
+cfg=""; mode=""; files=()
+shift  # exec
+mode="$2"; shift 2  # vitest list|run
+json=""
+while [ $# -gt 0 ]; do case "$1" in --config) cfg="$2"; shift 2;; --config=*) cfg="\${1#--config=}"; shift;; --json=*) json="\${1#--json=}"; shift;; --json) json="$2"; shift 2;; --*) shift;; *) files+=("$1"); shift;; esac; done
+mine() { case "$1" in orphan/*) return 1;; harness/*) [ -n "$cfg" ];; *) [ -z "$cfg" ];; esac; }
+if [ "$mode" = list ]; then
+  out=""; for f in "\${files[@]}"; do mine "$f" && out="$out\${out:+,}{\\"file\\":\\"$PWD/$f\\"}"; done; echo "[$out]" > "$json"; exit 0
+fi
+echo "ran in $(basename "$PWD") config=\${cfg:-default}: \${files[*]}"
+for f in "\${files[@]}"; do mine "$f" || { echo "No test files found, exiting with code 1"; exit 1; }; done
+echo " Test Files  \${#files[@]} passed (\${#files[@]})"; echo "      Tests  3 passed (3)"
+`, { mode: 0o755 });
+    commit(repo, { 'app/src/sum.ts': 'export const sum = (a: number, b: number) => b + a;\n', 'app/harness/spawn.ts': 'export const spawn = () => 2 - 1;\n' });
+    const r = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--only', 'lanes'], env);
+    expect(r.out).toMatch(/^tests {6}lanes {5}pass .*tests ran in 2 file\(s\), exit 0/m);
+    expect(r.out).toContain("pnpm exec vitest run --config 'vitest.harness.config.ts' 'harness/spawn.test.ts'");
+    const log = fs.readFileSync(/log: (\S+)/.exec(r.out)![1]!, 'utf8');
+    expect(log).toContain('config=default: src/sum.test.ts');
+    expect(log).toContain('config=vitest.harness.config.ts: harness/spawn.test.ts');
+    expect(r.status).toBe(EXIT.ok);
+    // vitest's `--json` takes an optional path; the listing goes to a scratch file, never over a selected test.
+    expect(fs.readFileSync(path.join(repo.work, 'app/harness/spawn.test.ts'), 'utf8')).toBe(HARNESS_APP['app/harness/spawn.test.ts']);
+    expect(fs.readFileSync(path.join(repo.work, 'app/src/sum.test.ts'), 'utf8')).toBe(HARNESS_APP['app/src/sum.test.ts']);
+
+    const groups = [{ runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['harness/spawn.test.ts', 'orphan/x.test.ts', 'src/sum.test.ts'], vitest: { exec: 'pnpm exec', configs: ['vitest.harness.config.ts'] } }];
+    expect(splitVitestConfigs(repo.work, groups, env)).toEqual({ groups: [
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['orphan/x.test.ts', 'src/sum.test.ts'] },
+      { runner: "pnpm exec vitest run --config 'vitest.harness.config.ts' {files}", cwd: 'app', files: ['harness/spawn.test.ts'] },
+    ], skipped: [] });
+    // A failed listing leaves the group as planned: the default run reports the excluded file, never a silent pass.
+    expect(splitVitestConfigs(repo.work, groups, env, () => null)).toEqual({ groups: [{ runner: 'pnpm exec vitest run {files}', cwd: 'app', files: groups[0]!.files }], skipped: [] });
+    expect(planRuns(ctxFor(repo, env), ['app/harness/spawn.test.ts']).groups).toEqual([{ runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['harness/spawn.test.ts'], vitest: { exec: 'pnpm exec', configs: ['vitest.harness.config.ts'] } }]);
+  }, 60_000);
+
+  // Value: protects=with `vitest_scripts` set, a selected test only a config outside it includes (a weekly tier the per-change gate
+  //   never runs) is named as not run and never runs or fails the lane, while an allowed config still runs its file; with the key
+  //   absent every script-named config runs as before; fails_when=the allowlist is ignored (the weekly file runs) or a skipped file
+  //   fails the lane or vanishes from the output; why_new=every script-named config ran (a repo's weekly-only test
+  //   ran in a /ship pregate); seam=none; no_claim=a real pnpm or vitest (shim answers `vitest list` by directory and config)
+  test('vitest_scripts: a test only a config outside the allowlist includes is named as not run; allowed configs still run', () => {
+    const WEEKLY_APP = {
+      ...APP,
+      'app/package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest run', 'test:harness': 'vitest run --config vitest.harness.config.ts', 'test:weekly': 'vitest run --config vitest.weekly.config.ts' }, devDependencies: { vitest: '^3.2.0' } }) + '\n',
+      'app/vitest.config.ts': "export default { test: { exclude: ['harness/**', 'weekly/**'] } };\n",
+      'app/vitest.harness.config.ts': "export default { test: { include: ['harness/**/*.test.ts'] } };\n",
+      'app/vitest.weekly.config.ts': "export default { test: { include: ['weekly/**/*.test.ts'] } };\n",
+      'app/harness/spawn.ts': 'export const spawn = () => 1;\n',
+      'app/harness/spawn.test.ts': "import { expect, test } from 'vitest';\nimport { spawn } from './spawn';\ntest('spawn', () => expect(spawn()).toBe(1));\n",
+      'app/weekly/hash.ts': 'export const hash = () => 1;\n',
+      'app/weekly/hash.test.ts': "import { expect, test } from 'vitest';\nimport { hash } from './hash';\ntest('hash', () => expect(hash()).toBe(1));\n",
+    };
+    const repo = fixture({ pregate: { vitest_scripts: ['test', 'test:harness'] }, baseFiles: WEEKLY_APP });
+    commit(repo, { '.github/workflows/free-tests.yml': null, '.github/workflows/windows.yml': null }, 'no workflows');
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    // vitest stand-in: each named config includes its own directory, the default config everything else.
+    const env = pmShim(repo);
+    fs.writeFileSync(path.join(repo.root, 'shim', 'pnpm'), `#!/usr/bin/env bash
+cfg=""; mode=""; files=()
+shift  # exec
+mode="$2"; shift 2  # vitest list|run
+json=""
+while [ $# -gt 0 ]; do case "$1" in --config) cfg="$2"; shift 2;; --config=*) cfg="\${1#--config=}"; shift;; --json=*) json="\${1#--json=}"; shift;; --json) json="$2"; shift 2;; --*) shift;; *) files+=("$1"); shift;; esac; done
+mine() { case "$1" in harness/*) [ "$cfg" = vitest.harness.config.ts ];; weekly/*) [ "$cfg" = vitest.weekly.config.ts ];; *) [ -z "$cfg" ];; esac; }
+if [ "$mode" = list ]; then
+  out=""; for f in "\${files[@]}"; do mine "$f" && out="$out\${out:+,}{\\"file\\":\\"$PWD/$f\\"}"; done; echo "[$out]" > "$json"; exit 0
+fi
+echo "ran in $(basename "$PWD") config=\${cfg:-default}: \${files[*]}"
+for f in "\${files[@]}"; do mine "$f" || { echo "No test files found, exiting with code 1"; exit 1; }; done
+echo " Test Files  \${#files[@]} passed (\${#files[@]})"; echo "      Tests  3 passed (3)"
+`, { mode: 0o755 });
+    commit(repo, { 'app/src/sum.ts': 'export const sum = (a: number, b: number) => b + a;\n', 'app/harness/spawn.ts': 'export const spawn = () => 2 - 1;\n', 'app/weekly/hash.ts': 'export const hash = () => 2 - 1;\n' });
+    const r = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--only', 'lanes'], env);
+    expect(r.out).toMatch(/^tests {6}lanes {5}pass .*tests ran in 2 file\(s\), exit 0/m);
+    expect(r.out).toContain('config not run by the gate');
+    expect(r.out).toContain('app/weekly/hash.test.ts (vitest.weekly.config.ts)');
+    const log = fs.readFileSync(/log: (\S+)/.exec(r.out)![1]!, 'utf8');
+    expect(log).toContain('config=default: src/sum.test.ts');
+    expect(log).toContain('config=vitest.harness.config.ts: harness/spawn.test.ts');
+    expect(log).not.toContain('weekly/hash.test.ts');
+    expect(r.status).toBe(EXIT.ok);
+    for (const f of ['app/harness/spawn.test.ts', 'app/weekly/hash.test.ts', 'app/src/sum.test.ts'] as const) expect(fs.readFileSync(path.join(repo.work, f), 'utf8')).toBe(WEEKLY_APP[f]);
+
+    // Only the weekly file selected: nothing runs, and the lane passes naming it rather than reading zero tests as a failure.
+    commit(repo, { 'app/weekly/hash.ts': 'export const hash = () => 3 - 2;\n' });
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    commit(repo, { 'app/weekly/hash.ts': 'export const hash = () => 4 - 3;\n' });
+    const only = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--only', 'lanes'], env);
+    expect(only.out).toMatch(/^tests {6}lanes {5}pass .*no selected file runs under a config the gate runs/m);
+    expect(only.out).toContain('app/weekly/hash.test.ts (vitest.weekly.config.ts)');
+    expect(only.status).toBe(EXIT.ok);
+
+    const files = ['harness/spawn.test.ts', 'src/sum.test.ts', 'weekly/hash.test.ts'];
+    const allowed = { ...ctxFor(repo, env), config: { ...DEFAULT_CONFIG, vitest_scripts: ['test', 'test:harness'] } } as PregateContext;
+    const planned = planRuns(allowed, files.map(f => `app/${f}`)).groups;
+    expect(planned).toEqual([{ runner: 'pnpm exec vitest run {files}', cwd: 'app', files, vitest: { exec: 'pnpm exec', configs: ['vitest.harness.config.ts'], excluded: ['vitest.weekly.config.ts'] } }]);
+    expect(splitVitestConfigs(repo.work, planned, env)).toEqual({ groups: [
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] },
+      { runner: "pnpm exec vitest run --config 'vitest.harness.config.ts' {files}", cwd: 'app', files: ['harness/spawn.test.ts'] },
+    ], skipped: [{ file: 'app/weekly/hash.test.ts', config: 'vitest.weekly.config.ts' }] });
+    // A failed excluded-config listing skips nothing: its file stays in the default group, never reported as skipped.
+    const weeklyListFails = (_g: unknown, config: string | null, listed: readonly string[]) =>
+      config === 'vitest.weekly.config.ts' ? null : listed.filter(f => f.startsWith(config ? 'harness/' : 'src/'));
+    expect(splitVitestConfigs(repo.work, planned, env, weeklyListFails)).toEqual({ groups: [
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['src/sum.test.ts', 'weekly/hash.test.ts'] },
+      { runner: "pnpm exec vitest run --config 'vitest.harness.config.ts' {files}", cwd: 'app', files: ['harness/spawn.test.ts'] },
+    ], skipped: [] });
+    // Key absent: every script-named config runs its files, as before.
+    const unset = planRuns(ctxFor(repo, env), files.map(f => `app/${f}`)).groups;
+    expect(unset).toEqual([{ runner: 'pnpm exec vitest run {files}', cwd: 'app', files, vitest: { exec: 'pnpm exec', configs: ['vitest.harness.config.ts', 'vitest.weekly.config.ts'] } }]);
+    expect(splitVitestConfigs(repo.work, unset, env).groups).toContainEqual({ runner: "pnpm exec vitest run --config 'vitest.weekly.config.ts' {files}", cwd: 'app', files: ['weekly/hash.test.ts'] });
+  }, 90_000);
 });
 
 describe('a declared runner gets only the files its tool runs', () => {

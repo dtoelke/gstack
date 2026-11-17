@@ -83,6 +83,11 @@ export function changedLiterals(file: string, oldText: string, newText: string):
 function escape(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function unquote(v: string): string { return /^['"`]/.test(v) ? v.slice(1, -1) : v; }
 
+const JS_FILE_RE = /\.[cm]?[jt]sx?$/;
+const SPECIFIER_RE = /(?:\bfrom|\bimport|\brequire|\b(?:vi|jest)\.(?:mock|doMock|unmock|importActual|importMock|requireActual|requireMock)|\bmock\.module)\s*\(?\s*(['"`])([^'"`\n]+)\1/g;
+/** Module specifiers a JS/TS file loads: static, side-effect and dynamic imports, re-exports, `require()` and mock helpers. */
+function specifiersIn(text: string): string[] { return [...text.matchAll(SPECIFIER_RE)].map(m => m[2]!); }
+
 /**
  * Test files that still carry the old literal beside the constant's name or
  * its module. The module counts as its full file name (`install.sh`, not
@@ -99,6 +104,15 @@ function unquote(v: string): string { return /^['"`]/.test(v) ? v.slice(1, -1) :
  * starts with `.` `)` `]`), comments excluded (#3492: `$2`, "from revision 2",
  * `export default 2`). A call-site name (`attempts`, `limit`) is an ordinary
  * word, so for it the file must also name the module (gstack-evals#97).
+ *
+ * For a constant (an uppercase name) with a longer value, a JS/TS test of a
+ * JS/TS module must name the constant or load the module: an `import`/`export
+ * … from`, side-effect `import`, `import()`, `require()` or mock-helper
+ * (`vi.mock`, `jest.requireActual`, `mock.module`, …) specifier that matches
+ * the module as above. The path inside any other string or comment (a shell
+ * command a workflow test searches for) does not load the module. A test that
+ * is not JS/TS, or a module that is not JS/TS (a script run by path), has no
+ * such specifier, so there the module's path anywhere in the text counts.
  *
  * A version-history row (`[45, "<digest>"]`, the old value first in a
  * bracketed row) is skipped when the same table, a run of consecutive
@@ -134,7 +148,10 @@ export function consumersOf(repoRoot: string, testFiles: readonly string[], chan
   for (const rel of testFiles) {
     let text: string;
     try { text = fs.readFileSync(path.join(repoRoot, rel), 'utf8'); } catch { continue; }
-    if (nameRequired ? !(nameRe.test(text) && (!callSite || moduleRe.test(text))) : !(nameRe.test(text) || moduleRe.test(text))) continue;
+    // A lowercase name is a property key or local (`limit`, `max`), a word any test may use; it
+    // counts only where the test also names the changed module, whatever the value's length.
+    const loads = () => jsLike && JS_FILE_RE.test(rel) ? specifiersIn(text).some(s => moduleRe.test(s)) : moduleRe.test(text);
+    if (nameRequired ? !(nameRe.test(text) && (!callSite || moduleRe.test(text))) : callSite ? !moduleRe.test(text) : !(nameRe.test(text) || loads())) continue;
     const lines = text.split('\n');
     const named = (i: number) => {
       if (comment(lines[i]!)) return false;

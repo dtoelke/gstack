@@ -165,19 +165,23 @@ const RESOLVED_IMPORTS = /\.(?:[cm]?[jt]sx?|py|dart)$/;
 const shown = (files: readonly string[]) => `${files.slice(0, 8).join(' ')}${files.length > 8 ? ` … +${files.length - 8} more` : ''}`;
 
 /**
- * Why a removed test no remaining test selects owes no lane, and the tests it selects, or `refused` when it must fail closed as
- * no lane. Only a removed JS, TS, Python, Dart or bats test is waived; any other removed path, a renamed source's old name
- * included, owes what an edit owes. Nothing is waived while a remaining file imports it, directly or through a directory
- * reference. A removed test runs the tests of every remaining non-Markdown file that names its basename (a curation list, a
- * durations manifest), and is refused when such a file has no test. A test renamed to a test then defers to its new name. A
- * deleted test, or one renamed to a non-test path, also runs the tests that directly exercise the files it exercised and names
- * those left with no test.
+ * Why a removed path no remaining test selects owes no lane, and the tests it selects, or `refused` when it must fail closed as
+ * no lane. A removed non-test path (deleted, or a rename's old name) leaves no code to test, so it is waived; a remaining file
+ * that still imports it is named, and its dangling import is the typecheck's to catch. The new name of a rename is a live file
+ * and owes a lane like any edit. A removed test is waived only when it is a JS, TS, Python, Dart or bats test and no remaining
+ * file imports it, directly or through a directory reference. A removed test runs the tests of every remaining non-Markdown
+ * file that names its basename (a curation list, a durations manifest), and is refused when such a file has no test. A test
+ * renamed to a test then defers to its new name. A deleted test, or one renamed to a non-test path, also runs the tests that
+ * directly exercise the files it exercised and names those left with no test.
  */
 function removedPath(ctx: PregateContext, graph: Graph, gone: ReadonlySet<string>, file: string): { removed: Removed; suite: string[] } | { refused: string } {
-  if (!isTestFile(file)) return { refused: 'removed, but only a removed test is waived; any other removal owes what an edit owes' };
+  const importers = [...new Set([...graph.reverse].filter(([k]) => k === file || (k.endsWith('/**') && file.startsWith(k.slice(0, -2)))).flatMap(([, list]) => list).map(e => e.from))].filter(f => !gone.has(f)).sort();
+  const renamedTo = ctx.touched.find(t => t.renamedFrom === file)?.path;
+  if (!isTestFile(file)) {
+    const note = [renamedTo ? `old name of ${renamedTo}` : 'deleted', 'no code left to test', importers.length ? `still referenced by ${shown(importers)}` : ''].filter(Boolean).join('; ');
+    return { removed: { file, note, lostCoverage: [] }, suite: [] };
+  }
   if (!RESOLVED_IMPORTS.test(file) && !file.endsWith('.bats')) return { refused: 'removed, but a Go or Ruby test may define helpers its package still uses, which the graph cannot see' };
-  const edges = [...graph.reverse].filter(([k]) => k === file || (k.endsWith('/**') && file.startsWith(k.slice(0, -2)))).flatMap(([, list]) => list);
-  const importers = [...new Set(edges.map(e => e.from))].filter(f => !gone.has(f)).sort();
   if (importers.length) return { refused: `removed, but still imported by ${shown(importers)}` };
   const namerSuite = new Set<string>();
   const uncovered = namedBy(ctx, file).filter(f => !gone.has(f)).filter(n => {
@@ -187,7 +191,6 @@ function removedPath(ctx: PregateContext, graph: Graph, gone: ReadonlySet<string
   });
   if (uncovered.length) return { refused: `removed, but still named by ${shown(uncovered)}, which no test covers` };
   const namerNote = namerSuite.size ? `files naming it run: ${shown([...namerSuite].sort())}` : '';
-  const renamedTo = ctx.touched.find(t => t.renamedFrom === file)?.path;
   if (renamedTo && isTestFile(renamedTo)) return { removed: { file, note: [`old name of ${renamedTo}`, namerNote].filter(Boolean).join('; '), lostCoverage: [] }, suite: [...namerSuite] };
   const subjects = graph.goneSubjects?.get(file);
   if (!subjects) return { refused: 'removed test whose merge-base text could not be read (not a regular file there, invalid UTF-8 or over 1 MiB)' };

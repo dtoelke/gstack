@@ -19,8 +19,10 @@
  * owes no lane when nothing remaining imports it, and is named on its own
  * `removed (no lane owed)` line; it runs the tests of files that still name it,
  * and a deleted test runs its owning suite or names the files that lost their
- * last test (issue #3529). Any other removal owes what an edit owes.
- * A test that reads the file still selects that test.
+ * last test (issue #3529). A removed non-test path no remaining test selects
+ * leaves no code to test and owes no lane either (same line); a rename's new
+ * name owes a lane like any edit.
+ * A test that reads a removed file still selects that test.
  * Under `--from-run <run>` the selected local test files a verified Free Tests
  * run on this exact tree lists count as passed (recorded as `from_run` with the
  * run receipt) and only the rest run; a refused run runs everything.
@@ -29,6 +31,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { baseInputs, defaultScratchRoot, sha256 } from '../context';
 import { PREGATE_CONFIG_PATH } from '../config';
@@ -66,8 +69,12 @@ export function detectRunner(ctx: Pick<PregateContext, 'config' | 'repoRoot'>, f
   return null;
 }
 
-/** One runner invocation: `files` relative to `cwd` (repo-relative, `''` for the root). */
-export interface RunGroup { runner: string; cwd: string; files: string[] }
+/**
+ * One runner invocation: `files` relative to `cwd` (repo-relative, `''` for the root). `vitest` marks a package whose scripts name other
+ * vitest configs (`vitest run --config <file>`): `exec` is its package manager's exec prefix, `configs` the ones the lanes check may run
+ * in script order, `excluded` the ones only scripts outside the policy's `vitest_scripts` name (never run).
+ */
+export interface RunGroup { runner: string; cwd: string; files: string[]; vitest?: { exec: string; configs: string[]; excluded?: string[] } }
 
 /** The nearest directory at or above `file` holding `marker`, repo-relative; null when none does. `seen` memoises per directory (one map per marker). */
 function nearestRoot(repoRoot: string, file: string, marker: string, seen: Map<string, string | null>): string | null {
@@ -169,7 +176,7 @@ function packageManager(repoRoot: string, dir: string): string {
  * neither, so its files stay with the root runner. `missing` names a package
  * manager that is not on PATH.
  */
-function packageRunner(repoRoot: string, dir: string, env: NodeJS.ProcessEnv): { runner: string } | { missing: string } | null {
+function packageRunner(repoRoot: string, dir: string, env: NodeJS.ProcessEnv, allowed: readonly string[] | null): { runner: string; vitest?: RunGroup['vitest'] } | { missing: string } | null {
   const pkg = readPackageJson(repoRoot, dir);
   if (!pkg) return null;
   const deps = { ...pkg.dependencies, ...pkg.devDependencies };
@@ -179,7 +186,96 @@ function packageRunner(repoRoot: string, dir: string, env: NodeJS.ProcessEnv): {
   const pm = packageManager(repoRoot, dir);
   const bin = pm === 'npm' ? 'npx' : pm;
   if (!onPath(bin, env)) return { missing: bin };
-  return { runner: `${PM_EXEC[pm]} ${tool} {files}` };
+  const { configs, excluded } = tool === 'vitest run' ? scriptVitestConfigs(repoRoot, dir, pkg, allowed) : { configs: [], excluded: [] };
+  return { runner: `${PM_EXEC[pm]} ${tool} {files}`, ...(configs.length || excluded.length ? { vitest: { exec: PM_EXEC[pm]!, configs, ...(excluded.length ? { excluded } : {}) } } : {}) };
+}
+
+/**
+ * The config files a package's scripts pass to vitest (`--config <f>`, `--config=<f>`, `-c <f>`), deduplicated in script order; only
+ * files that exist. With `allowed` (the policy's `vitest_scripts`), a config no allowed script names is `excluded` instead.
+ */
+function scriptVitestConfigs(repoRoot: string, dir: string, pkg: PackageJson, allowed: readonly string[] | null): { configs: string[]; excluded: string[] } {
+  const found: string[] = [];
+  const runs = new Set<string>();
+  for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
+    for (const part of script.split(/&&|\|\||[;|]/)) {
+      if (!/(?:^|[\s/])vitest(?=\s|$)/.test(part)) continue;
+      for (const m of part.matchAll(/(?:^|\s)(?:--config(?:=|\s+)|-c\s+)(['"]?)([^\s'"]+)\1/g)) {
+        const file = path.posix.normalize(m[2]!);
+        if (!fs.existsSync(path.join(repoRoot, dir, file))) continue;
+        if (!found.includes(file)) found.push(file);
+        if (!allowed || allowed.includes(name)) runs.add(file);
+      }
+    }
+  }
+  return { configs: found.filter(f => runs.has(f)), excluded: found.filter(f => !runs.has(f)) };
+}
+
+/** Lists the files of `files` (relative to `cwd`) that vitest's `config` (null: the default) includes; null when the listing fails. */
+export type VitestLister = (g: RunGroup, config: string | null, files: readonly string[], env: NodeJS.ProcessEnv) => string[] | null;
+
+const listVitestFiles: VitestLister = (g, config, files, env) => {
+  const dir = path.resolve(g.cwd);
+  // `--json` takes an optional path: given before a file argument it would write the listing over that file, so it always names a scratch file.
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-vitest-list-'));
+  const json = path.join(out, 'list.json');
+  try {
+    const cmd = `${g.vitest!.exec} vitest list --filesOnly --json=${quote(json)}${config ? ` --config=${quote(config)}` : ''} ${files.map(quote).join(' ')}`;
+    const r = spawnSync('sh', ['-c', cmd], { cwd: dir, env: { ...env, CI: env.CI ?? '1' }, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+    if (r.status !== 0) return null;
+    return claimedFiles(dir, files, fs.existsSync(json) ? fs.readFileSync(json, 'utf8') : '[]');
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+};
+
+/** The files of `files` (relative to `dir`) a `vitest list --json` listing names; null when the listing is not a JSON array. */
+function claimedFiles(dir: string, files: readonly string[], text: string): string[] | null {
+  let listed: unknown;
+  try { listed = JSON.parse(text.trim() || '[]'); } catch { return null; }
+  if (!Array.isArray(listed)) return null;
+  const real = (p: string) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const root = real(dir);
+  const claimed = new Set(listed.map(e => (e && typeof e.file === 'string' ? path.relative(root, real(path.resolve(dir, e.file))).split(path.sep).join('/') : '')));
+  return files.filter(f => claimed.has(path.posix.normalize(f)));
+}
+
+/** A selected file only an excluded vitest config includes (repo-relative), with that config (package-relative). */
+export interface GateSkipped { file: string; config: string }
+
+/**
+ * A vitest package whose scripts name other configs runs each selected file under the config that includes it: the default config
+ * first, then each named config in script order (a harness tier the default config excludes runs under its own config, never as "No
+ * test files found"). vitest itself answers which config includes a file (`vitest list --filesOnly`). A file only an `excluded` config
+ * includes (one no `vitest_scripts` script names: a weekly tier the per-change gate never runs) is `skipped`: not run, not counted as
+ * covered. A file no config includes stays with the default run, which reports it; a listing that fails leaves the group as planned.
+ */
+export function splitVitestConfigs(repoRoot: string, groups: readonly RunGroup[], env: NodeJS.ProcessEnv, list: VitestLister = listVitestFiles): { groups: RunGroup[]; skipped: GateSkipped[] } {
+  const skipped: GateSkipped[] = [];
+  const split = groups.flatMap(g => {
+    if (!g.vitest) return [g];
+    const abs = { ...g, cwd: path.join(repoRoot, g.cwd) };
+    const byDefault = list(abs, null, g.files, env);
+    if (!byDefault) return [{ runner: g.runner, cwd: g.cwd, files: g.files }];
+    let left = g.files.filter(f => !byDefault.includes(f));
+    const extra: RunGroup[] = [];
+    for (const config of g.vitest.configs) {
+      if (!left.length) break;
+      const claimed = list(abs, config, left, env) ?? [];
+      if (!claimed.length) continue;
+      extra.push({ runner: `${g.vitest.exec} vitest run --config ${quote(config)} {files}`, cwd: g.cwd, files: claimed });
+      left = left.filter(f => !claimed.includes(f));
+    }
+    for (const config of g.vitest.excluded ?? []) {
+      if (!left.length) break;
+      const claimed = list(abs, config, left, env) ?? [];
+      skipped.push(...claimed.map(f => ({ file: g.cwd ? `${g.cwd}/${f}` : f, config })));
+      left = left.filter(f => !claimed.includes(f));
+    }
+    const kept = g.files.filter(f => byDefault.includes(f) || left.includes(f));
+    return [...(kept.length ? [{ runner: g.runner, cwd: g.cwd, files: kept }] : []), ...extra];
+  });
+  return { groups: split, skipped };
 }
 
 /**
@@ -214,7 +310,9 @@ function declaredRunnerFiles(runner: string): RegExp | null {
  * Dart tests run from their own package root (a sub-package's imports resolve
  * against its own pubspec); Rust tests run per crate as `cargo test -p <name>`
  * from the crate's workspace root; JS/TS tests owned by a nested package that
- * declares vitest or jest run from that package; a JS/TS test that imports
+ * declares vitest or jest run from that package (under the config that
+ * includes them when its scripts name other vitest configs, among those the
+ * policy's `vitest_scripts` names: `splitVitestConfigs`, at run time); a JS/TS test that imports
  * `@playwright/test` runs through `playwright test` from its nearest package;
  * the rest go to the detected runner from the repo root, split by language
  * when no one runner fits them all (`.mjs` + `.py` runs both), and pytest only
@@ -257,11 +355,18 @@ export function planRuns(ctx: PregateContext, files: readonly string[]): RunPlan
     }
     const pkg = /\.[cm]?[jt]sx?$/.test(f) ? nearestRoot(ctx.repoRoot, f, 'package.json', seenPackage) : null;
     if (pkg !== null && importsPlaywright(readRepoFile(ctx.repoRoot, f) ?? '')) { add(playwright, pkg, under(pkg, f)); continue; }
-    if (pkg) {
-      if (!pkgRunners.has(pkg)) pkgRunners.set(pkg, packageRunner(ctx.repoRoot, pkg, ctx.env));
-      const r = pkgRunners.get(pkg);
-      if (r && 'missing' in r) { missing.add(r.missing); unclaimed.push(f); continue; }
-      if (r) { add(packages, pkg, under(pkg, f)); continue; }
+    // A nested package.json that declares no runner (say one that only sets `type`) defers to the next package.json up.
+    let owner = pkg;
+    while (owner) {
+      if (!pkgRunners.has(owner)) pkgRunners.set(owner, packageRunner(ctx.repoRoot, owner, ctx.env, ctx.config.vitest_scripts ?? null));
+      if (pkgRunners.get(owner)) break;
+      owner = nearestRoot(ctx.repoRoot, owner, 'package.json', seenPackage);
+    }
+    if (owner) {
+      const r = pkgRunners.get(owner)!;
+      if ('missing' in r) { missing.add(r.missing); unclaimed.push(f); continue; }
+      add(packages, owner, under(owner, f));
+      continue;
     }
     if (!f.endsWith('.dart')) { rest.push(f); continue; }
     const root = dartRoot(ctx.repoRoot, f, seen);
@@ -289,7 +394,10 @@ export function planRuns(ctx: PregateContext, files: readonly string[]): RunPlan
     else unclaimed.push(...part);
   }
   for (const [runner, list] of byRunner) groups.push({ runner, cwd: '', files: list });
-  for (const [root, list] of [...packages].sort(([a], [b]) => a.localeCompare(b))) groups.push({ runner: (pkgRunners.get(root) as { runner: string }).runner, cwd: root, files: list });
+  for (const [root, list] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
+    const r = pkgRunners.get(root) as { runner: string; vitest?: RunGroup['vitest'] };
+    groups.push({ runner: r.runner, cwd: root, files: list, ...(r.vitest ? { vitest: r.vitest } : {}) });
+  }
   for (const [root, list] of [...playwright].sort(([a], [b]) => a.localeCompare(b))) {
     const pm = packageManager(ctx.repoRoot, root);
     const bin = pm === 'npm' ? 'npx' : pm;
@@ -453,7 +561,7 @@ function unfinished(ctx: PregateContext, r: Awaited<ReturnType<typeof runLocal>>
   const timedOut = r.runs.filter(x => x.outcome === 'timeout');
   const rest = r.failed ? `; ${r.failed} failed` : '';
   if (stalled.length) {
-    return { code: 'PREGATE_STALLED', detail: `no test output for ${ctx.stallTimeoutMs / 1000} s${STALL_IDLE}; process group killed; last file started: ${stalled.map(x => x.lastFile ?? `(none reported; ${x.files.length} file(s))`).join(', ')}${rest}`, fix: `read ${r.log} for the stalled file; fix the hang, or raise --stall-timeout (stall_timeout_s in ${ctx.configFile}; 0 disables) for a test that waits quietly for longer` };
+    return { code: 'PREGATE_STALLED', detail: `no test output for ${ctx.stallTimeoutMs / 1000} s${STALL_IDLE}; process tree killed; last file started: ${stalled.map(x => x.lastFile ?? `(none reported; ${x.files.length} file(s))`).join(', ')}${rest}`, fix: `read ${r.log} for the stalled file; fix the hang, or raise --stall-timeout (stall_timeout_s in ${ctx.configFile}; 0 disables) for a test that waits quietly for longer` };
   }
   const launch = r.runs.find(x => x.outcome === 'spawn-failed');
   if (launch) {
@@ -627,13 +735,20 @@ async function runSelected(ctx: PregateContext, sel: Selection, base: CheckResul
   const dropped = plan.dropped ? `${plan.dropped.length} selected file(s) the declared runner cannot run (not run, not counted as covered): ${plan.dropped.join(' ')}` : '';
   if (!plan.groups.length && dropped) return { ...base, status: sel.remote.length ? 'requires-remote' : 'pass', detail: `no selected file is one the declared runner can run; ${dropped}` };
   if (!plan.groups.length) return { ...base, status: 'incomplete', ...gap, ...(gap?.environment ? { lines: [...lines, environmentLine(gap.environment)] } : {}) };
-  const { groups } = plan;
-  const total = groups.reduce((n, g) => n + g.files.length, 0);
   const runtime = launchRuntime(ctx.repoRoot, ctx.env);
   if (runtime.refusal) return { ...base, ...runtime.refusal, cause: 'environment', environment: launchCause('runtime', runtime.refusal.detail), lines: [`runtime: ${runtime.label}`, environmentLine(launchCause('runtime', runtime.refusal.detail))] };
+  const { groups, skipped } = splitVitestConfigs(ctx.repoRoot, plan.groups, runtime.env);
+  // Like a file the declared runner cannot run: named, not run, not counted as covered, never a failure.
+  const notGate = skipped.length ? `${skipped.length} selected file(s) only a vitest config outside vitest_scripts includes (config not run by the gate; not run, not counted as covered): ${skipped.map(s => `${s.file} (${s.config})`).join(' ')}` : '';
+  const notRun = [dropped, notGate].filter(Boolean);
+  if (!groups.length) {
+    if (gap) return { ...base, status: 'incomplete', ...gap, detail: [gap.detail, ...notRun].join('; '), ...(gap.environment ? { lines: [...lines, environmentLine(gap.environment)] } : {}) };
+    return { ...base, status: sel.remote.length ? 'requires-remote' : 'pass', detail: `no selected file runs under a config the gate runs; ${notRun.join('; ')}` };
+  }
+  const total = groups.reduce((n, g) => n + g.files.length, 0);
   const r = await runLocal(ctx, runtime.env, groups);
   const adapters = [...new Set(groups.map(g => adapterFor(g.runner)).filter(Boolean))];
-  const runLines = [...lines, ...(dropped ? [`not run: ${dropped}`] : []), `runtime: ${runtime.label}`, `progress: ${adapters.join(', ') || 'none (no progress adapter for this runner; serial files and heartbeats only)'}`, `ran: ${r.command.length > 200 ? `${r.command.slice(0, 200)}…` : r.command}`, `log: ${r.log}`, ...r.tail.map(l => `  ${l}`)];
+  const runLines = [...lines, ...notRun.map(n => `not run: ${n}`), `runtime: ${runtime.label}`, `progress: ${adapters.join(', ') || 'none (no progress adapter for this runner; serial files and heartbeats only)'}`, `ran: ${r.command.length > 200 ? `${r.command.slice(0, 200)}…` : r.command}`, `log: ${r.log}`, ...r.tail.map(l => `  ${l}`)];
   const withRun = { ...base, lines: runLines, inputs: { ...inputs, command: sha256(r.command), runtime: runtime.label } };
   if (r.exit === null) {
     const why = unfinished(ctx, r, total);
@@ -651,7 +766,7 @@ async function runSelected(ctx: PregateContext, sel: Selection, base: CheckResul
     return { ...withRun, status: 'fail', cause: 'diff', code: 'PREGATE_LANE_FAILED', detail: `local lane exited ${r.exit} (${r.failed ?? '?'} failed of ${r.ran ?? '?'} ran; ${total} files; pipefail)`, fix: `read ${r.log}, fix the in-branch failure, rerun gstack-pregate --stage tests` };
   }
   if (r.ran === 0) return { ...withRun, status: 'fail', cause: 'diff', code: 'PREGATE_LANE_FAILED', detail: `ZERO-RUN: the runner reported 0 tests${r.zero ? ` in ${r.zero}` : ''} (${total} selected file(s))`, fix: 'a bad selector, a missing file or a skipped describe; exit 0 is not a pass' };
-  const detail = `${r.ran ?? 'count unavailable'} tests ran in ${total} file(s)${r.serial ? ` (${r.serial} serial)` : ''}, exit 0${dropped ? `; ${dropped}` : ''}${sel.remote.length ? `; ${sel.remote.length} requires-remote obligation(s)` : ''}`;
+  const detail = `${r.ran ?? 'count unavailable'} tests ran in ${total} file(s)${r.serial ? ` (${r.serial} serial)` : ''}, exit 0${notRun.map(n => `; ${n}`).join('')}${sel.remote.length ? `; ${sel.remote.length} requires-remote obligation(s)` : ''}`;
   if (gap) return { ...withRun, status: 'incomplete', ...gap, detail: `${detail}; ${gap.detail}`, ...(gap.environment ? { lines: [...runLines, environmentLine(gap.environment)] } : {}) };
   return { ...withRun, status: sel.remote.length ? 'requires-remote' : 'pass', detail };
 }

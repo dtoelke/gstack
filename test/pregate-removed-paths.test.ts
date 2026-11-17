@@ -1,12 +1,13 @@
 /**
  * A test a branch removes (deleted, or the old name of a rename) owes no lane
- * when nothing remaining imports it (issue #3529, gbrain#7829); any other
- * removal, a renamed source's old name included, owes what an edit owes, as on
- * main. Each waived test prints a visible `removed (no lane owed): <path> — <why>`
- * line: it runs the tests of files that still name it, and a deleted test runs
- * its owning suite (the remaining tests of the files it exercised) or says which
- * subjects lost their last test; a modified file whose only test was deleted
- * still fails, and an unreadable deleted test fails closed.
+ * when nothing remaining imports it (issue #3529, gbrain#7829). A removed
+ * non-test path no remaining test selects leaves no code to test and owes no
+ * lane either; a rename's new name owes a lane like any edit. Each waived path
+ * prints a visible `removed (no lane owed): <path> — <why>` line: a removed test
+ * runs the tests of files that still name it, and a deleted test runs its owning
+ * suite (the remaining tests of the files it exercised) or says which subjects
+ * lost their last test; a modified file whose only test was deleted still fails,
+ * and an unreadable deleted test fails closed.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -56,13 +57,14 @@ describe('removed paths in lanes (#3529)', () => {
     expect(r.check.detail).toContain('1 removed path(s); 1 subject(s) lost their last test');
   });
 
-  test('deleting a file and its test together waives the test; the deleted file still owes a lane', () => {
+  test('deleting a file and its test together waives both', () => {
     const repo = fixture();
     commit(repo, { 'test/util.test.js': null, 'lib/util.js': null });
     const r = lanes(repo);
-    expect(r.check.code).toBe('PREGATE_NO_LANE');
-    expect(r.check.detail).toContain('1 touched file(s) with no test lane: lib/util.js');
-    expect(r.removed).toEqual(['removed (no lane owed): test/util.test.js — it exercised no file still in the tree']);
+    expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+    expect(r.check.status).toBe('pass');
+    expect(r.removed).toEqual(['removed (no lane owed): lib/util.js — deleted; no code left to test', 'removed (no lane owed): test/util.test.js — it exercised no file still in the tree']);
+    expect(r.check.detail).toContain('2 removed path(s)');
     expect(r.check.detail).not.toContain('lost their last test');
   });
 
@@ -146,21 +148,20 @@ describe('removed paths in lanes (#3529)', () => {
       expect(r.ran).toContain('test/fixture-dir.test.js');
     });
 
-    test.each(['package.json', '.github/workflows/windows.yml', 'test/golden/digest.txt'])('deleting %s owes what editing it owes: PREGATE_NO_LANE', file => {
+    test.each(['package.json', '.github/workflows/windows.yml', 'test/golden/digest.txt'])('deleting %s no test selects owes no lane', file => {
       const repo = fixture();
       commit(repo, { [file]: null });
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.check.detail).toContain(file);
-      expect(r.removed).toEqual([]);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual([`removed (no lane owed): ${file} — deleted; no code left to test`]);
     });
 
-    test('a deleted source file a remaining config still names fails closed', () => {
+    test('a deleted source file a remaining config still names owes no lane', () => {
       const repo = fixture({ baseFiles: { 'scripts/setup.js': "console.log('setup');\n", 'bunfig.toml': '[test]\npreload = ["./scripts/setup.js"]\n' } });
       commit(repo, { 'scripts/setup.js': null });
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.check.detail).toContain('scripts/setup.js');
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual(['removed (no lane owed): scripts/setup.js — deleted; no code left to test']);
     });
 
     test('a deleted test that remaining code still imports fails closed', () => {
@@ -174,7 +175,6 @@ describe('removed paths in lanes (#3529)', () => {
     });
 
     const GO_MOD = 'module example.com/demo\n\ngo 1.22\n';
-    const NOT_A_TEST = 'removed, but only a removed test is waived; any other removal owes what an edit owes';
     test.each([
       ['a file nothing references', { 'lib/orphan.js': 'exports.o = 1;\n' }, 'lib/orphan.js'],
       ['a file untested code imports without an extension', { 'src/d.ts': 'export const d = 1;\n', 'src/u.ts': "import { d } from './d';\nexport const u = d + 1;\n" }, 'src/d.ts'],
@@ -186,14 +186,13 @@ describe('removed paths in lanes (#3529)', () => {
       ['a config its runner loads by name', { 'vitest.config.ts': 'export default {};\n' }, 'vitest.config.ts'],
       ['a Python startup file', { 'sitecustomize.py': 'import builtins\nbuiltins.FEATURE = True\n' }, 'sitecustomize.py'],
       ['a setup file a nested config names relative to itself', { 'packages/app/setup.ts': 'export {};\n', 'packages/app/bunfig.toml': '[test]\npreload = ["./setup.ts"]\n' }, 'packages/app/setup.ts'],
-    ])('deleting %s still owes a lane, as on main', (_what, files, deleted) => {
+    ])('deleting %s no test selects owes no lane', (_what, files, deleted) => {
       const repo = fixture({ baseFiles: files });
       commit(repo, { [deleted]: null });
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.removed).toEqual([]);
-      const explain = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--explain']);
-      expect(explain.out + explain.err).toContain(`${deleted}: ${NOT_A_TEST}`);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toHaveLength(1);
+      expect(r.removed[0]).toStartWith(`removed (no lane owed): ${deleted} — deleted; no code left to test`);
     });
 
     test('deleting a Go test whose package may share its helpers fails closed', () => {
@@ -206,13 +205,24 @@ describe('removed paths in lanes (#3529)', () => {
       expect(explain.out + explain.err).toContain('pkg/a_test.go: removed, but a Go or Ruby test may define helpers');
     });
 
-    test('a renamed source\'s old name still owes a lane, as on main', () => {
+    test('a renamed source\'s old name owes no lane; its new name is covered by the test that imports it', () => {
       const repo = fixture();
       move(repo, 'lib/util.js', 'lib/util2.js', ['test/util.test.js', t => t.replace('../lib/util.js', '../lib/util2.js')]);
       const r = lanes(repo);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual(['removed (no lane owed): lib/util.js — old name of lib/util2.js; no code left to test']);
+      expect(r.ran).toContain('test/util.test.js');
+    });
+
+    // Value: protects=a rename's new path is a live file and owes a lane like any edit, though its old name is waived;
+    //   fails_when=the removed-path waiver also clears the new name; why_new=the non-test removal waiver; seam=none; no_claim=none
+    test('a renamed file\'s new path no test selects still owes a lane', () => {
+      const repo = fixture();
+      move(repo, 'lib/orphan.js', 'lib/orphan2.js');
+      const r = lanes(repo);
       expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.check.detail).toContain('lib/util.js');
-      expect(r.removed).toEqual([]);
+      expect(r.check.detail).toContain('1 touched file(s) with no test lane: lib/orphan2.js');
+      expect(r.removed).toEqual(['removed (no lane owed): lib/orphan.js — old name of lib/orphan2.js; no code left to test']);
     });
 
     const CURATION = "exports.SKIP = ['test/util.test.js'];\n";
@@ -255,44 +265,39 @@ describe('removed paths in lanes (#3529)', () => {
       expect(explain.out + explain.err).toContain('test/util.test.js: removed, but still named by scripts/skip-list.txt, which no test covers');
     });
 
-    test('a rename into a waived path does not waive the old name: package.json renamed to Markdown fails closed', () => {
+    test('a source renamed to Markdown: the old name owes no lane, the new name is the docs empty lane', () => {
       const repo = fixture();
       move(repo, 'package.json', 'docs/package.md');
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.check.detail).toContain('package.json');
-      expect(r.removed).toEqual([]);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual(['removed (no lane owed): package.json — old name of docs/package.md; no code left to test']);
+      expect(r.lines).toContain('docs/no-tests (empty lane): docs/package.md');
     });
 
-    test('a renamed source remaining untested code still imports by its old name fails closed', () => {
+    test('a renamed source remaining untested code still imports by its old name owes no lane and names the importer', () => {
       const repo = fixture({ baseFiles: { 'lib/a.js': 'exports.a = 1;\n', 'lib/u.js': "exports.u = require('./a.js').a;\n", 'notes/plan.md': '# plan\n' } });
       move(repo, 'lib/a.js', 'notes/a.md');
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.check.detail).toContain('lib/a.js');
-      expect(r.removed).toEqual([]);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual(['removed (no lane owed): lib/a.js — old name of notes/a.md; no code left to test; still referenced by lib/u.js']);
     });
 
-    test('a deleted file a remaining bin reads through its directory fails closed', () => {
+    test('a deleted file a remaining bin reads through its directory owes no lane and names the reader', () => {
       const repo = fixture({ baseFiles: { 'lib/plugins/a.js': 'exports.a = 1;\n', 'lib/plugins/b.js': 'exports.b = 2;\n', 'bin/load.js': "const fs = require('node:fs');\nfor (const f of fs.readdirSync('lib/plugins')) require('../lib/plugins/' + f);\n" } });
       commit(repo, { 'lib/plugins/a.js': null });
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.removed).toEqual([]);
-      const explain = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--explain']);
-      expect(explain.out + explain.err).toContain(`lib/plugins/a.js: ${NOT_A_TEST}`);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual(['removed (no lane owed): lib/plugins/a.js — deleted; no code left to test; still referenced by bin/load.js']);
     });
 
-    test('a deleted file a tested loader reaches by a computed path fails closed', () => {
+    test('a deleted file a tested loader reaches by a computed path owes no lane', () => {
       const loader = "const path = require('node:path');\nexports.value = () => require(path.join(__dirname, 'lib', 'value.js')).value;\n";
       const loaderTest = "const test = require('node:test');\nconst { value } = require('../loader.js');\ntest('loads', () => value());\n";
       const repo = fixture({ baseFiles: { 'lib/value.js': 'exports.value = 1;\n', 'loader.js': loader, 'test/loader.test.js': loaderTest } });
       commit(repo, { 'lib/value.js': null });
       const r = lanes(repo);
-      expect(r.check.code).toBe('PREGATE_NO_LANE');
-      expect(r.removed).toEqual([]);
-      const explain = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--explain']);
-      expect(explain.out + explain.err).toContain(`lib/value.js: ${NOT_A_TEST}`);
+      expect(r.check.code).not.toBe('PREGATE_NO_LANE');
+      expect(r.removed).toEqual(['removed (no lane owed): lib/value.js — deleted; no code left to test']);
     });
 
     test('a Go test renamed into another directory is refused: its old package may still call its helpers', () => {

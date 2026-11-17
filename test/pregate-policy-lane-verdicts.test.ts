@@ -189,14 +189,16 @@ describe('negative controls: a policy that declares lanes still fails hard', () 
     expect([r.status, r.row.status, r.row.code]).toEqual([EXIT.fail, 'fail', 'PREGATE_NO_LANE']);
   });
 
-  // Value: protects=without a [] declaration a deleted test still runs its owning suite and an unmapped deleted source still fails;
-  //   fails_when=moving the removed-test handling waives non-test removals; why_new=new; seam=none; no_claim=none
-  test('a deleted source file under a lane-declaring policy still owes a lane', () => {
+  // Value: protects=under a lane-declaring policy a deleted source owes no lane (no code left to test) while an unmapped edited
+  //   source beside it still fails hard; fails_when=the removed-path waiver also clears live files, or deleted sources fail again;
+  //   why_new=the non-test removal waiver; seam=none; no_claim=none
+  test('a deleted source file under a lane-declaring policy owes no lane; an unmapped edit beside it still does', () => {
     const repo = fixture();
-    commit(repo, { 'test/util.test.js': null, 'lib/util.js': null });
+    commit(repo, { 'test/util.test.js': null, 'lib/util.js': null, ...UNMAPPED });
     const r = lanes(repo);
     expect(r.row.code).toBe('PREGATE_NO_LANE');
-    expect(r.row.detail).toContain('lib/util.js');
+    expect(r.row.detail).toContain('1 touched file(s) with no test lane: lib/orphan.js');
+    expect(r.row.detail).toContain('2 removed path(s)');
   });
 
   // Value: protects=warn: ["lanes"] does not downgrade a red lane even with every file mapped; fails_when=the lanes downgrade starts

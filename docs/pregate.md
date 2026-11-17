@@ -91,7 +91,7 @@ the byte-pinned `/ship` renders in `test/fixtures/golden/`).
 
 | Key | Meaning |
 |---|---|
-| `runner` | the local test command with `{files}` (gstack: `bun test --timeout=30000 {files}`, the 30 s per-test timeout CI uses); set, the local lane gives it only the selected files its tool runs, judged by extension (JS/TS files for `bun test`, `node --test`, `deno test`, vitest, jest, mocha, ava or playwright; `.py` files for pytest; each matched as a whole word, so `npx vitest run` counts and `tests/node/run.sh` does not; every file for any other command, such as a `node scripts/run-tests.js` dispatcher, or one naming both), and the lanes detail names each file it cannot run as not run and not counted as covered, so a `*_test.py` never reaches a local `bun test` (no Python lane runs beside a declared runner; the remote gate and `test_backend` commands still receive the whole selection, a declared test tree's tests included, since that exclusion is local-only); unset, it is detected (bun, vitest or jest for JS/TS files, pytest when python3 can import it (else `pytest` or `python3` is named missing), `node --test`, and `flutter test`/`dart test` per Dart package root, through fvm when that package or an ancestor pins it with `.fvmrc` or `.fvm/fvm_config.json` and fvm is on PATH; `cargo test -p <name>` per Rust crate, run from the root of the workspace the crate is a member of (Cargo's `members` globs, `exclude` and `package.workspace`), else the crate directory; a JS/TS test whose nearest package.json is a nested package declaring vitest or jest (a dependency or its `test` script) runs from that package, with package-relative paths, through the package manager its `packageManager` field or the nearest lockfile up to the repo root names: `pnpm exec`, `yarn`, `bun x`, else `npx`; a JS/TS test file that imports `@playwright/test` at the start of a line runs as `playwright test --reporter=list` from its nearest package through that same package manager, whatever the unit runner is, a type-only import (`import type …`, or one whose every specifier is `type X`) does not count, file arguments are passed as escaped regexes anchored to the path (Playwright reads them as regexes), and a run where every test fails and Playwright says its browser is not installed is `PREGATE_ENVIRONMENT` (a partial install, where some tests pass, stays the diff's failure); every other test keeps the root detection, split by language when no one runner fits them all, so `.mjs` and `.py` root tests each get their own runner); nothing detected, a Dart SDK, cargo or package manager missing from PATH, a `.dart` file with no `pubspec.yaml` above it, a `.rs` file outside any crate, or one in a crate whose name Cargo would reject (anything but letters, digits, `_` and `-`), is `incomplete` (the runnable groups still run, so a real failure still fails) |
+| `runner` | the local test command with `{files}` (gstack: `bun test --timeout=30000 {files}`, the 30 s per-test timeout CI uses); set, the local lane gives it only the selected files its tool runs, judged by extension (JS/TS files for `bun test`, `node --test`, `deno test`, vitest, jest, mocha, ava or playwright; `.py` files for pytest; each matched as a whole word, so `npx vitest run` counts and `tests/node/run.sh` does not; every file for any other command, such as a `node scripts/run-tests.js` dispatcher, or one naming both), and the lanes detail names each file it cannot run as not run and not counted as covered, so a `*_test.py` never reaches a local `bun test` (no Python lane runs beside a declared runner; the remote gate and `test_backend` commands still receive the whole selection, a declared test tree's tests included, since that exclusion is local-only); unset, it is detected (bun, vitest or jest for JS/TS files, pytest when python3 can import it (else `pytest` or `python3` is named missing), `node --test`, and `flutter test`/`dart test` per Dart package root, through fvm when that package or an ancestor pins it with `.fvmrc` or `.fvm/fvm_config.json` and fvm is on PATH; `cargo test -p <name>` per Rust crate, run from the root of the workspace the crate is a member of (Cargo's `members` globs, `exclude` and `package.workspace`), else the crate directory; a JS/TS test whose nearest package.json is a nested package declaring vitest or jest (a dependency or its `test` script) runs from that package, with package-relative paths, through the package manager its `packageManager` field or the nearest lockfile up to the repo root names: `pnpm exec`, `yarn`, `bun x`, else `npx`; when that package's scripts pass vitest other configs (`--config <file>`, `--config=<file>` or `-c <file>`, a harness tier its default config excludes), `vitest list --filesOnly` decides at run time which config includes each selected test, the default first and then each named config in script order, and the file runs as `vitest run --config <file>` under the first that includes it; with `vitest_scripts` set, only configs an allowed script names run, and a file only another config includes (a weekly tier) is named on a `not run:` line, not run and not counted as covered, without failing the lane; a file no config includes, or a listing that fails, stays with the default run, which reports it; a JS/TS test file that imports `@playwright/test` at the start of a line runs as `playwright test --reporter=list` from its nearest package through that same package manager, whatever the unit runner is, a type-only import (`import type …`, or one whose every specifier is `type X`) does not count, file arguments are passed as escaped regexes anchored to the path (Playwright reads them as regexes), and a run where every test fails and Playwright says its browser is not installed is `PREGATE_ENVIRONMENT` (a partial install, where some tests pass, stays the diff's failure); every other test keeps the root detection, split by language when no one runner fits them all, so `.mjs` and `.py` root tests each get their own runner); nothing detected, a Dart SDK, cargo or package manager missing from PATH, a `.dart` file with no `pubspec.yaml` above it, a `.rs` file outside any crate, or one in a crate whose name Cargo would reject (anything but letters, digits, `_` and `-`), is `incomplete` (the runnable groups still run, so a real failure still fails) |
 | `dependencies` | glob → test files for subprocess targets, runtime reads and generated inputs the import graph cannot see; `[]` declares "no lane needed" (docs, licences). A `[]` on a folder inside a test directory (`test/`, `tests/`, `spec/` or `__tests__/`, as in `"tests/live/**": []`; never the whole directory, so `"test/**": []` changes nothing) is the repo's statement that the tests under it run in their own tier, not in /ship's local lane: pregate keeps every selected test under that glob out of the local lane, whether touched or picked through an import (a test `.gstack/always-run.json` names still runs; the remote side is unchanged: the remote gate, `test_backend` and any remote platform lane that selects the test still owe it; and only a base-branch or user-owned policy's `[]` counts, never a bootstrap head file read under `--policy-from` head when neither exists), and prints `declared test tree <glob>: N test file(s) not run in the local lane` in the `lanes` lines it records; tests outside the glob still run, and a `[]` on any other glob never skips a test. A `[]` that matches a deleted test does not skip it: the deleted test still runs its owning suite, and a file naming it that `[]` covers (a durations list) counts as covered. With this key present, even empty, the policy [declares lanes](#lane-requirements) |
 | `empty_lanes` | extra globs for the docs/no-tests empty lane. Any Markdown file already qualifies with no pin file when no test depends on it (the same import graph as other files: a quoted path, a `join()` of path segments, an import, or a `dependencies` entry). reStructuredText and AsciiDoc count as Markdown here. README, CHANGELOG, CONTRIBUTING, LICENSE, AGENTS and CLAUDE qualify even without `.md`, and so does licence text under any vendored name (`roboto-LICENSE.txt`, `LICENSE-MIT`, `licenses/*.txt`). Source code and files under a test directory never qualify. A test that reads the file still selects that test |
 | `selection` | `workflow.yml/job` → a command printing the lane's file list, for matrices a planner computes (gstack: `scripts/test-free-shards.ts --list`) |
@@ -100,9 +100,10 @@ the byte-pinned `/ship` renders in `test/fixtures/golden/`).
 | `local` | `workflow.yml/job` lanes a local run satisfies: a platform-agnostic toolchain (an `ubuntu-latest` suite that runs the same on a Mac), or a repo whose CI is off. Their tests run here instead of becoming `requires-remote`, except that on a machine under 8 cores with a `remote_gate` or a remote `test_backend` the small-machine rule still records the test tier as a `requires-remote` obligation. `--explain` notes an id that matches no workflow lane |
 | `guards` | `[{ id, when: [globs], command, fix?, timeout_s? }]`: repo commands a lane must pass when a touched file matches `when` (manifest checks, subprocess goldens the import graph cannot see); see [guards](#guards) |
 | `serial_patterns` | test-file globs the `lanes` check runs one process per file, apart from the unit files (default `**/*.serial.test.*`) |
+| `vitest_scripts` | package script names whose `--config` vitest configs the `lanes` check may run: the scripts the repo's per-change gate runs (`["test", "test:harness"]`). An allowlist: a config named only by other scripts (`test:weekly`) never runs, and a selected file only such a config includes is named as not run (config not run by the gate) and not counted as covered; it never fails the lane. A config named by an allowed and another script runs. The default config (no `--config`) always runs. Absent: every config a package script names may run |
 | `sealed` | sealed or eval output that must never reach a public destination; read by the pre-push hook and `gstack-pregate sealed` (see [sealed output](#sealed)) |
 | `price_file` | repo-relative path of the paid gate's call-plan data file (`GSTACK_EVAL_CALLS v1`); `gstack-eval-plan price-gate` prices from it and never executes anything ([docs/eval-calls.md](eval-calls.md)) |
-| `stall_timeout_s` | seconds a test command may print nothing while using under a tenth of one CPU before its process group is killed and the check is `incomplete` (`PREGATE_STALLED`); default 300, `0` disables; `--stall-timeout` overrides; the `--remote` gate is exempt (see [supervision](#supervision)) |
+| `stall_timeout_s` | seconds a test command may print nothing while its process tree uses under a tenth of one CPU before the tree is killed and the check is `incomplete` (`PREGATE_STALLED`); default 300, `0` disables; `--stall-timeout` overrides; the `--remote` gate is exempt (see [supervision](#supervision)) |
 | `timeout_s` | seconds each runner process may take (the unit-file group, each serial file, each guard without its own `timeout_s`, and the remote gate's deadline) when `--timeout` is not passed; 1 to 3600, default 600. `gstack-ship-preflight` forwards its own `--timeout`; without it, and in the `finish` fallback, this is how a repo with long lanes sets theirs. The whole pregate under `gstack-ship-preflight` has a separate budget, `--step-timeout <s>` (1 to 86400, default 3600): a pregate stopped there prints `PREGATE: time limit hit` and a STOP naming the way out, push and let CI's full run at the tree carry the tests ([CI carry](#ci-carry)), or a larger `--step-timeout` |
 | `remote_gate` | the repo's remote test gate command; under 8 cores the local test tier becomes a `requires-remote` obligation naming it, and `--remote` runs it (see [remote gate](#remote-gate)) |
 | `run_profiles` | a map from each profile name to `{ workflow, events, jobs, artifact, max_age_hours?, os?, skippable? }`: the GitHub Actions runs `clear --run` verifies as evidence on the identical tree; a profile named after a lane (`free-tests.yml/macos-named-regressions`) clears that lane (see [run evidence](#run-evidence)). `--from-run` and the reuse job verify runs against them too ([from-run](#from-run), [CI reuse](#ci-reuse)) |
@@ -269,6 +270,16 @@ Two stages with separate clocks, both printed:
   elsewhere in the file is not a consumer. A call-site name such as `attempts`
   or `limit` is an ordinary word, so for it the file must also name the changed
   module.
+  That holds for a call-site name whatever the old value's length: a file that
+  names only the word is not a consumer. For a constant (an uppercase name)
+  with a longer old value, a JS/TS test of a JS/TS module must name the
+  constant or load the module: an `import`/`export … from`, side-effect
+  `import`, `import()`, `require()` or mock-helper (`vi.mock`,
+  `jest.requireActual`, `mock.module`, …) specifier that matches the module as
+  above. The module's path inside any other string or comment (a shell command
+  a workflow test searches for) does not load it. A test or module that is not
+  JS/TS has no such specifier, so there the module's path anywhere in the text
+  counts.
   A test that keeps the old value on purpose, such as the refused input after a
   minimum version goes up, marks that one line with a comment on it or on the
   comment line directly above it:
@@ -344,15 +355,27 @@ Two stages with separate clocks, both printed:
   merge-base text exercised (`owning suite runs: …`; test helpers and
   fixtures are not subjects), and names each file left with no test at all
   (`coverage removed: <file> has no remaining test`, and `M subject(s) lost
-  their last test` in the detail). Every other removal owes what an edit
-  owes, as before: a deleted or renamed Go or Ruby test (it may define
-  helpers its package still uses), a deleted test whose merge-base text
-  cannot be read (a symlink, invalid UTF-8, over 1 MiB), and any removed
-  non-test path, a renamed source file's old name included, are still
-  `PREGATE_NO_LANE` until a test or a `dependencies` entry covers them. A
-  modified file whose only test the branch deleted still has no lane, and a
-  remaining test that reads a deleted file or directory is selected. /review
-  lists a deleted test as a gate edit (RH-1) either way.
+  their last test` in the detail). A removed non-test path (a deleted file,
+  or a renamed file's old name) that no remaining test selects leaves no
+  code to test, so it owes no lane either and prints the same line
+  (`removed (no lane owed): <path> — deleted; no code left to test`, or
+  `old name of <new>`, plus `still referenced by …` when a remaining file
+  still imports or reads it: a dangling import is the typecheck's to catch).
+  The new name of a rename is a live file and owes a lane like any edit. A
+  deleted or renamed Go or Ruby test (it may define helpers its package
+  still uses) and a deleted test whose merge-base text cannot be read (a
+  symlink, invalid UTF-8, over 1 MiB) stay `PREGATE_NO_LANE` until a test
+  or a `dependencies` entry covers them. A modified file whose only test
+  the branch deleted still has no lane, and a remaining test that reads a
+  deleted file or directory is selected. /review lists a deleted test as a
+  gate edit (RH-1) either way.
+  A JS/TS import's `paths` aliases and `baseUrl` come from the nearest
+  tsconfig.json (else jsconfig.json) above the importing file that declares
+  `paths` or `baseUrl`, itself or through a relative `extends` chain (up to
+  four hops), joined relative to the config that declares them; a nested
+  config that declares neither defers to the next one up, and the
+  repository root's config governs the rest. So `@/x` in
+  `apps/mobile/src/a.test.ts` resolves through `apps/mobile/tsconfig.json`.
   An extensionless JS/TS import (relative, a tsconfig/jsconfig `paths` alias or
   `baseUrl`) tries the exact path, then `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`,
   `.cjs`, `.mts`, `.cts`, then `index.ts`, `index.tsx`, `index.js`, `index.jsx`
@@ -530,14 +553,18 @@ test-tier command:
   a one-file run (each serial file) reports its file from the launch for any
   runner. Other runners (node --test, vitest, jest, pytest, playwright test, flutter test, dart test, cargo test) get heartbeats
   only. A heartbeat follows each 60 s with no progress line;
-- is killed as **stalled** when its log does not grow and its process group
+- is killed as **stalled** when its log does not grow and its process tree
   stays under a tenth of one CPU for the stall timeout (`--stall-timeout <s>`, else
   `stall_timeout_s`, else 300; `0` disables): the check is `incomplete` with
   `PREGATE_STALLED` and names the last file started; the next serial file
-  still runs. The group counts as busy when its CPU time, sampled each second,
-  grew by at least a tenth of the wall time, so a quiet suite that is working
-  (FOUN-63: a parallel `check.sh` silent for 9 minutes) is not killed, while
-  a hang that waits on nothing is. A hang that keeps burning CPU is left to
+  still runs. The process tree is the command's process group plus every
+  descendant reached by parent links, whatever session or group it started,
+  so a worker a launcher starts in its own session (`pnpm exec` running
+  Vitest) counts. The tree counts as busy when its CPU time, sampled each
+  second, grew by at least a tenth of the wall time, so a quiet suite that is
+  working (FOUN-63: a parallel `check.sh` silent for 9 minutes) is not killed,
+  while a hang that waits on nothing is. A descendant reparented away from the
+  tree (a double-forked daemon) no longer counts. A hang that keeps burning CPU is left to
   the timeout. Linux reads `/proc` (exited children's time included once
   reaped); macOS and other BSDs read `ps -S`; a failed read skips that
   sample. Windows reads no CPU time here and uses log growth alone. The `--remote` gate is exempt: a
@@ -548,9 +575,13 @@ test-tier command:
   serial files that each fit still pass): the check is `incomplete`, its detail
   names which of the three set the timeout, and the next serial file still runs.
 
-A kill is SIGTERM to the group, then SIGKILL after 5 s (a group that ignores
-SIGTERM still dies). SIGINT or SIGTERM to `gstack-pregate` itself SIGKILLs every
-running group, writes no `pregate.json` and exits 130 or 143. Windows has no
+A stall or timeout kill is SIGTERM to the process group and to the group of
+each descendant that left it, then SIGKILL to the same groups after 5 s (a
+group that ignores SIGTERM still dies, and a worker in its own session is not
+orphaned). After a normal exit only the command's own group is killed: a
+descendant that started its own session is reparented once the command exits
+and is left alone. SIGINT or SIGTERM to `gstack-pregate` itself SIGKILLs every
+running tree, writes no `pregate.json` and exits 130 or 143. Windows has no
 process groups here: the kill is `taskkill /T /F` on the shell's tree, which
 misses a descendant that was reparented or started detached.
 
