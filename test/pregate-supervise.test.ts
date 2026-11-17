@@ -96,7 +96,7 @@ describe('supervise: process group, log file, stall and deadline', () => {
 
   // Value: protects=a quiet suite whose runner starts its worker in a new session (pnpm exec running Vitest) is measured as busy, and a
   //   stall or timeout kill reaches that worker; fails_when=the stall check reads CPU of the runner's process group alone and kills the busy
-  //   lane, or the kill signals only that group and orphans the worker; why_new=tools/repo test:scripts ended PREGATE_STALLED three times at one
+  //   lane, or the kill signals only that group and orphans the worker; why_new=a pnpm 11 monorepo's script suite ended PREGATE_STALLED three times at one
   //   tree under pnpm 11 while green outside pregate; seam=none; no_claim=a worker reparented away from the tree (double fork) is not measured
   test('a worker the runner starts in its own session counts toward CPU: busy and silent runs to the end, never-ending is killed with the runner at the deadline', async () => {
     const dir = scratch();

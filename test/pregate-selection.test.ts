@@ -276,8 +276,8 @@ describe('literals (pure)', () => {
   // Value: protects=a JS/TS test counts as a consumer of a JS/TS module's constant only when it names the constant or loads the module
   //   through an import, re-export, dynamic import, require or mock-helper specifier, so a workflow test that searches for the module's
   //   path inside a shell-command string is not one, while a non-JS test still matches the path in its text; fails_when=the module's
-  //   path anywhere in a JS/TS test's text counts again (STAGING_GATE_JOB 'gate' -> 'Gate' flagged 18 unrelated 'gate' strings in a
-  //   test that only searched for `node tools/repo/src/ci/ci-budget-report.ts`); why_new=import specifiers and text mentions were one
+  //   path anywhere in a JS/TS test's text counts again (GATE_JOB 'gate' -> 'Gate' flagged 18 unrelated 'gate' strings in a
+  //   test that only searched for the module's path in a shell command); why_new=import specifiers and text mentions were one
   //   rule; seam=none; no_claim=lowercase call-site names and one-character values (unchanged text rule)
   test('consumersOf: a JS/TS test loads a JS/TS module only through a specifier; its path in a string or comment does not count', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-specifier-'));
@@ -285,7 +285,7 @@ describe('literals (pure)', () => {
     const files: Record<string, string> = {
       'ci/boundary.test.ts': ['// runs tools/ci/budget-report.ts weekly', "const step = steps.find((s) => s.run?.includes('node tools/ci/budget-report.ts'));", "expect(step.needs).toContain('gate');", ''].join(nl),
       'ci/budget-report.test.ts': ["import { summarize } from '../tools/ci/budget-report';", "expect(summarize().job).toBe('gate');", ''].join(nl),
-      'ci/named.test.ts': ["expect(STAGING_GATE_JOB).not.toBe('gate');", ''].join(nl),
+      'ci/named.test.ts': ["expect(GATE_JOB).not.toBe('gate');", ''].join(nl),
       'ci/dynamic.test.ts': ["const mod = await import('../tools/ci/budget-report.ts');", "expect(mod.job).toBe('gate');", ''].join(nl),
       'ci/mocked.test.ts': ["vi.mock('../tools/ci/budget-report', () => ({}));", "expect(job).toBe('gate');", ''].join(nl),
       'ci/reexport.test.ts': ["export { summarize } from '../tools/ci/budget-report.js';", "expect(job).toBe('gate');", ''].join(nl),
@@ -293,7 +293,7 @@ describe('literals (pure)', () => {
       'ci/runner.test.sh': ['node tools/ci/budget-report.ts', "[ \"$job\" = 'gate' ]", ''].join(nl),
     };
     for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
-    expect(consumersOf(root, Object.keys(files), { name: 'STAGING_GATE_JOB', old: "'gate'", new: "'Gate'", file: 'tools/ci/budget-report.ts' })).toEqual([
+    expect(consumersOf(root, Object.keys(files), { name: 'GATE_JOB', old: "'gate'", new: "'Gate'", file: 'tools/ci/budget-report.ts' })).toEqual([
       'ci/budget-report.test.ts:2', 'ci/named.test.ts:1', 'ci/dynamic.test.ts:2', 'ci/mocked.test.ts:2', 'ci/reexport.test.ts:2', 'ci/runner.test.sh:2',
     ]);
     fs.rmSync(root, { recursive: true, force: true });
@@ -1070,7 +1070,7 @@ describe('nested JS packages run their own runner from their own directory', () 
 
   // Value: protects=a test under a package.json that names no runner (one that only sets `type: module`) runs with the next package up
   //   that declares vitest, from that package, instead of falling to the root's bun; fails_when=the nearest package.json alone decides
-  //   again (apps/mobile/dev under apps/mobile: 43 of 146 failing under bun); why_new=only a runnerless package directly under the root
+  //   again (a dev-tools folder inside an app package: 43 of 146 failing under bun); why_new=only a runnerless package directly under the root
   //   was tested; seam=none; no_claim=the runners themselves (plan only)
   test('a runnerless package.json inside a vitest package defers to that package', () => {
     const repo = fixture({ pregate: null, baseFiles: { ...APP, 'app/dev/package.json': JSON.stringify({ type: 'module' }) + '\n' } });
