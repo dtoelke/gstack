@@ -213,7 +213,9 @@ interface ConfigOptions { baseUrl?: Located<string>; paths?: Located<Record<stri
 /** `baseUrl` and `paths` of one config after its relative `extends` chain (later entries and the config itself override). */
 function effectiveOptions(repoRoot: string, rel: string, depth: number, seen: Set<string>, notes: string[]): ConfigOptions | null {
   let json: { extends?: unknown; compilerOptions?: { baseUrl?: unknown; paths?: unknown } };
-  try { json = JSON.parse(stripJsonc(fs.readFileSync(path.join(repoRoot, rel), 'utf8'))) ?? {}; } catch { return null; }
+  const text = readRepoFile(repoRoot, rel);
+  if (text === null) return null;
+  try { json = JSON.parse(stripJsonc(text)) ?? {}; } catch { return null; }
   const dir = path.posix.dirname(rel);
   let options: ConfigOptions = {};
   const parents = typeof json.extends === 'string' ? [json.extends] : Array.isArray(json.extends) ? json.extends.filter((e): e is string => typeof e === 'string') : [];
@@ -234,17 +236,17 @@ function effectiveOptions(repoRoot: string, rel: string, depth: number, seen: Se
 }
 
 /**
- * The tsconfig.json (else jsconfig.json) `paths` of directory `dir` (`''`, the
- * default, is the repository root), relative to the repo, following relative
- * `extends` up to MAX_TSCONFIG_EXTENDS hops. Targets join `baseUrl` when one
- * is set, else the directory of the config declaring `paths`. What is not
- * followed is recorded in `notes` for the no-lane explanation; a missing alias
- * leaves no edge (so `no lane`), never a wrong one.
+ * The tsconfig.json (else jsconfig.json) `paths` in repo directory `dir` (the
+ * root by default), relative to the repo, following relative `extends` inside
+ * the repo up to MAX_TSCONFIG_EXTENDS hops. Targets join
+ * `baseUrl` when one is set, else the directory of the config declaring
+ * `paths`. What is not followed is recorded in `notes` for the no-lane
+ * explanation; a missing alias leaves no edge (so `no lane`), never a wrong one.
  */
-export function readPathAliases(repoRoot: string, dir = ''): PathAliases {
+export function readPathAliases(repoRoot: string, dir = '.'): PathAliases {
   for (const name of ['tsconfig.json', 'jsconfig.json']) {
     const notes: string[] = [];
-    const rel = dir ? `${dir}/${name}` : name;
+    const rel = normalize(path.posix.join(dir, name));
     const options = effectiveOptions(repoRoot, rel, 0, new Set([rel]), notes);
     if (!options) continue;
     const baseUrl = options.baseUrl ? normalize(path.posix.join(options.baseUrl.dir, options.baseUrl.value)) : null;
@@ -264,32 +266,37 @@ export function readPathAliases(repoRoot: string, dir = ''): PathAliases {
 const NO_ALIASES: PathAliases = { aliases: [], baseUrl: null, notes: [] };
 
 /**
- * The aliases that govern each importing file: those of the nearest
- * tsconfig.json/jsconfig.json above it (its own directory first) that declares
- * `paths` or `baseUrl`, itself or through `extends`, else the root config's. A
- * nested config that declares neither (one that only sets `strict`, or extends a
- * package) defers to the next config up, so a file never loses an alias the root
- * would give it. `notes` gathers every config's unfollowed `extends`.
+ * The aliases governing each file: those of the nearest nested tsconfig.json
+ * or jsconfig.json above it (its own directory first) that declares `paths`
+ * or `baseUrl`, itself or through `extends`, else the root config's. A nested
+ * config that declares neither defers upward, so a file never loses an alias
+ * the root gives it. With no nested config every file gets the root's.
  */
-export function pathAliasResolver(repoRoot: string, files: Iterable<string>): { aliasesFor: (rel: string) => PathAliases; notes: string[] } {
+function pathAliasResolver(repoRoot: string, files: readonly string[]): { aliasesFor: (rel: string) => PathAliases; notes: string[] } {
   const root = readPathAliases(repoRoot);
   const notes = [...root.notes];
-  const configDirs = new Set<string>();
-  for (const f of files) if (/(?:^|\/)[tj]sconfig\.json$/.test(f) && f.includes('/')) configDirs.add(path.posix.dirname(f));
-  const own = new Map<string, PathAliases | null>();
-  for (const dir of configDirs) {
+  const read = new Set<string>();
+  const declaring = new Map<string, PathAliases>();
+  for (const f of files) {
+    const dir = path.posix.dirname(f);
+    if (dir === '.' || read.has(dir) || !/^[tj]sconfig\.json$/.test(path.posix.basename(f))) continue;
+    read.add(dir);
     const config = readPathAliases(repoRoot, dir);
     for (const n of config.notes) if (!notes.includes(n)) notes.push(n);
-    own.set(dir, config.aliases.length || config.baseUrl !== null ? config : null);
+    if (config.aliases.length || config.baseUrl !== null) declaring.set(dir, config);
   }
   const byDir = new Map<string, PathAliases>();
-  const governing = (dir: string): PathAliases => {
-    if (dir === '.' || dir === '') return root;
-    let hit = byDir.get(dir);
-    if (!hit) { hit = own.get(dir) ?? governing(path.posix.dirname(dir)); byDir.set(dir, hit); }
+  const aliasesFor = (rel: string): PathAliases => {
+    const start = path.posix.dirname(rel);
+    let hit = byDir.get(start);
+    if (hit) return hit;
+    let d = start;
+    while (d !== '.' && !declaring.has(d)) d = path.posix.dirname(d);
+    hit = declaring.get(d) ?? root;
+    byDir.set(start, hit);
     return hit;
   };
-  return { aliasesFor: rel => governing(path.posix.dirname(rel)), notes };
+  return { aliasesFor, notes };
 }
 
 /**

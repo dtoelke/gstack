@@ -14,8 +14,6 @@ Everything the fork adds is a commit on `main`; `git log --first-parent
   - literals: a lowercase name counts a test as a consumer only when the test
     names the changed module; an uppercase constant only when a JS/TS test
     names the constant or imports the module.
-  - import graph: `paths`/`baseUrl` aliases resolve per file from the nearest
-    tsconfig/jsconfig.
   - lane selection: a removed non-test path that no remaining test selects
     owes no lane.
   - lanes: a selected vitest file runs under the first script-named config
