@@ -5788,6 +5788,40 @@ origin cannot be reached, from its local stable ref and release tags.
 **Fix.** Run `git fetch origin --tags` in the gstack checkout, or point
 `GSTACK_STABLE_REPO` at a gstack checkout that has the tags, then rerun.
 
+<a id="push-refused"></a>
+### `PUSH_REFUSED`
+
+**Meaning.** `gstack-ship-release push` stopped before `git push` ran and
+ended with `PUSH: failed reason=PUSH_REFUSED`: a usage error, HEAD on another
+branch than Step 1 saved, the unanswered one-time pre-push offer, open gate
+findings on a ready PR, sealed output, the early secrets scan, the pre-push
+guards, or a never-pushed branch name that is not plain words. Nothing was
+pushed. [The push line](unattended.md#push-line).
+
+**Fix.** Follow the `STOP:` line printed just above it, then rerun
+`gstack-ship-release push`.
+
+<a id="push-rejected"></a>
+### `PUSH_REJECTED`
+
+**Meaning.** `git push` was rejected: the remote branch has commits this
+branch lacks (non-fast-forward), or the remote refused the update. Nothing
+was pushed.
+
+**Fix.** Fetch and inspect the remote, merge it under Step 3's conflict
+rules, run Steps 5-16 again, then rerun push. Never force-push.
+
+<a id="push-git-failed"></a>
+### `PUSH_GIT_FAILED`
+
+**Meaning.** `git ls-remote` could not read the remote branch, or
+`git push` failed for a reason other than a rejection: authentication, a
+pre-push hook or the network. Nothing was pushed.
+
+**Fix.** Repair the cause git printed in the `STOP:` line, repeat Step 16
+(even when the content is unchanged), then rerun push. Never bypass a failed
+guard.
+
 <a id="queue-not-ready"></a>
 ### `QUEUE_NOT_READY`
 
@@ -7250,6 +7284,23 @@ fix-check, or the second full pass with the deferred finding's id),
 pass the `gstack-review-scope summary` file as `--review-loop`, put the printed
 line in the PR body, and write again
 ([ship-policy.md](ship-policy.md#ship-receipt)).
+
+<a id="ci-carry-rerun-malformed"></a>
+### `CI_CARRY_RERUN_MALFORMED`
+
+**Meaning.** A CI run's `tree.json` names `rerun_files` or `attempts`, the
+fields that say some test files passed only on a re-run attempt, but in a shape
+gstack cannot read: `rerun_files` is not a list of file paths, or `attempts` is
+not a list of attempt numbers of 1 or more. gstack fails closed: that run is not
+evidence, the carry refuses it (`rerun_malformed` in the `CI_CARRY: none` or
+`no_verified_run` detail), and the lane runs here instead. A well-formed record
+is accepted and marked `rerun=<files> attempts=<list>`
+([ship-policy.md](ship-policy.md#ci-carry-rerun)).
+
+**Fix.** Fix the workflow step that writes `tree.json` so it writes
+`"rerun_files": ["test/a.test.ts", …]` and `"attempts": [1, 2]`, or leaves both
+out. Then dispatch a fresh run at the same head and rerun
+`gstack-ci-carry wait`.
 
 <a id="receipt-carry-tree-mismatch"></a>
 ### `RECEIPT_CARRY_TREE_MISMATCH`
