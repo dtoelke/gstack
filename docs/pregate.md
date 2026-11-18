@@ -269,9 +269,9 @@ Two stages with separate clocks, both printed:
   above. A `$2` in a shell stub, a comment, or `export default 2` in a fixture
   elsewhere in the file is not a consumer. A call-site name such as `attempts`
   or `limit` is an ordinary word, so for it the file must also name the changed
-  module.
-  That holds for a call-site name whatever the old value's length: a file that
-  names only the word is not a consumer. For a constant (an uppercase name)
+  module, whatever the old value's length: a test that only uses the word is not
+  a consumer, and a test that imports the module still is.
+  For a constant (an uppercase name)
   with a longer old value, a JS/TS test of a JS/TS module must name the
   constant or load the module: an `import`/`export … from`, side-effect
   `import`, `import()`, `require()` or mock-helper (`vi.mock`,

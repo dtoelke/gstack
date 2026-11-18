@@ -103,7 +103,8 @@ function specifiersIn(text: string): string[] { return [...text.matchAll(SPECIFI
  * continues it (the line before ends open, `(` `,` `.` `=`, or the line
  * starts with `.` `)` `]`), comments excluded (#3492: `$2`, "from revision 2",
  * `export default 2`). A call-site name (`attempts`, `limit`) is an ordinary
- * word, so for it the file must also name the module (gstack-evals#97).
+ * word, so for it the file must also name the module whatever the value's
+ * length (gstack-evals#97, #4478).
  *
  * For a constant (an uppercase name) with a longer value, a JS/TS test of a
  * JS/TS module must name the constant or load the module: an `import`/`export
@@ -148,10 +149,9 @@ export function consumersOf(repoRoot: string, testFiles: readonly string[], chan
   for (const rel of testFiles) {
     let text: string;
     try { text = fs.readFileSync(path.join(repoRoot, rel), 'utf8'); } catch { continue; }
-    // A lowercase name is a property key or local (`limit`, `max`), a word any test may use; it
-    // counts only where the test also names the changed module, whatever the value's length.
+    // An uppercase constant with a longer value: a JS/TS test of a JS/TS module must name it or load the module through a specifier.
     const loads = () => jsLike && JS_FILE_RE.test(rel) ? specifiersIn(text).some(s => moduleRe.test(s)) : moduleRe.test(text);
-    if (nameRequired ? !(nameRe.test(text) && (!callSite || moduleRe.test(text))) : callSite ? !moduleRe.test(text) : !(nameRe.test(text) || loads())) continue;
+    if (!((nameRequired ? nameRe.test(text) : nameRe.test(text) || (callSite ? moduleRe.test(text) : loads())) && (!callSite || moduleRe.test(text)))) continue;
     const lines = text.split('\n');
     const named = (i: number) => {
       if (comment(lines[i]!)) return false;

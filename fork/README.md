@@ -11,9 +11,8 @@ Everything the fork adds is a commit on `main`; `git log --first-parent
 --no-merges upstream/main..main` lists them.
 
 - **Pre-gate fixes** (`lib/pregate/`, `docs/pregate.md`, their tests):
-  - literals: a lowercase name counts a test as a consumer only when the test
-    names the changed module; an uppercase constant only when a JS/TS test
-    names the constant or imports the module.
+  - literals: an uppercase constant counts a JS/TS test as a consumer only
+    when the test names the constant or imports the module.
   - lane selection: a removed non-test path that no remaining test selects
     owes no lane.
   - lanes: a selected vitest file runs under the first script-named config
