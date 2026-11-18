@@ -47,12 +47,15 @@ it, so `headless` keeps its BLOCK semantics.
   `timing: analytics skipped (...)` instead of writing to a disk that vanishes.
   Point `GSTACK_STATE_ROOT` at a durable directory when you want cross-run
   history (see [state-root.md](state-root.md)).
-- **The autoplan publication guard is named, not faked.** On hosts that do not
-  execute Claude Code hooks, and in every unattended session, `gstack-skill-start`
-  prints `autoplan guard: not enforced by this host; publication order is
-  unverified (GUARD_NOT_INSTALLED)` once. `gstack-artifact validate` requires
-  that line in an unattended run's `review-record.md`. Claude Code's
-  deny-on-absent behavior is unchanged.
+- **The autoplan publication guard is named, not faked.** `gstack-skill-start`
+  prints one guard line for /autoplan, chosen by host, not by session kind. On
+  Claude Code with the hook declared in `autoplan/SKILL.md` it prints
+  `autoplan guard: enforced by Claude Code's /autoplan hook ... (GUARD_ENFORCED)`,
+  because the hook denies phase entry there in unattended sessions too. On hosts
+  that do not execute Claude Code hooks it prints `autoplan guard: not enforced
+  by this host; publication order is unverified (GUARD_NOT_INSTALLED)`.
+  `gstack-artifact validate` requires one of the two in an unattended run's
+  `review-record.md`. Claude Code's deny-on-absent behavior is unchanged.
 
 An unknown `GSTACK_SESSION_KIND` value coerces to `interactive` and says so:
 `SESSION_KIND: interactive (unknown kind '<x>')`.
@@ -67,8 +70,11 @@ GSTACK_RESULT: skill=<name> status=<status> run=<dir>
 
 `status` is one of `complete`, `reviewed`, `gate_pending`, `incomplete`,
 `interrupted` or `refused`; `run` is where the run's record is. `/autoplan`
-always ends `gate_pending` when it reaches the final gate, because the gate is
-written and never approved. `/autoplan --ceo-only` ends `reviewed`: it runs the
+ends `gate_pending` when it reaches the final gate with no owner reply, because
+the session never approves the gate on its own judgment; when the owner's own
+reply is relayed to it, the session records it with `gstack-autoplan answer
+--by agent:<id> --owner-reply-file <file>` (see the driver steps below).
+`/autoplan --ceo-only` ends `reviewed`: it runs the
 CEO phase alone, asks nothing, writes no gate and approves nothing (see
 [CEO-only runs](#ceo-only-runs)). Pure queries (`gstack-artifact schema`,
 `gstack-gate render`) print no result line.

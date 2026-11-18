@@ -336,6 +336,7 @@ gstack_result_anchor() {
     REVIEW_SCOPE_LEDGER) printf '%s' 'review-scope-ledger' ;;
     RECEIPT_CARRY_REFUSED) printf '%s' 'receipt-carry-refused' ;;
     PROSE_LINT_FOUND) printf '%s' 'prose-lint-found' ;;
+    RECEIPT_BLOCKER_OPEN) printf '%s' 'receipt-blocker-open' ;;
     REVIEW_LOOP_EXCEPTION_INVALID) printf '%s' 'review-loop-exception-invalid' ;;
     CI_CARRY_RERUN_MALFORMED) printf '%s' 'ci-carry-rerun-malformed' ;;
     RECEIPT_CARRY_TREE_MISMATCH) printf '%s' 'receipt-carry-tree-mismatch' ;;
@@ -442,6 +443,7 @@ gstack_result_anchor() {
     OFFICE_HOURS_PROBE_REFUSED) printf '%s' 'office-hours-probe-refused' ;;
     TASKS_SUPERSEDE_REFUSED) printf '%s' 'tasks-supersede-refused' ;;
     REALITY_RECEIPT_UNRESOLVED) printf '%s' 'reality-receipt-unresolved' ;;
+    GUARD_ENFORCED) printf '%s' 'guard-enforced' ;;
     CEO_ONLY_CONFLICT) printf '%s' 'ceo-only-conflict' ;;
     CEO_ONLY_AFTER_INIT) printf '%s' 'ceo-only-after-init' ;;
     CEO_ONLY_NO_GATE) printf '%s' 'ceo-only-no-gate' ;;
